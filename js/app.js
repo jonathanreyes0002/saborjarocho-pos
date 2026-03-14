@@ -36,7 +36,7 @@ async function init() {
   }
 
   // Lock orientation
-  screen.orientation?.lock('landscape').catch(() => {});
+  try { screen.orientation?.lock('landscape'); } catch(_) {}
 
   // Open DB
   await openDB();
