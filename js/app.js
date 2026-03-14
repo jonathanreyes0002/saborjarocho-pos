@@ -1695,4 +1695,19 @@ styleEl.textContent = `
 `;
 document.head.appendChild(styleEl);
 
-init();
+document.addEventListener('DOMContentLoaded', () => {
+  init().catch(err => {
+    console.error('Sabor Jarocho init error:', err);
+    document.body.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;
+                  justify-content:center;height:100vh;font-family:sans-serif;
+                  padding:24px;text-align:center;color:#555;">
+        <div style="font-size:48px;margin-bottom:16px">⚠️</div>
+        <h2 style="color:#c0392b;margin:0 0 8px">Error al iniciar la app</h2>
+        <p style="margin:0 0 4px">${err.message || err}</p>
+        <p style="font-size:13px;color:#888;margin-top:16px">
+          Abre la consola del navegador para más detalles.</p>
+      </div>`;
+  });
+});
+```
