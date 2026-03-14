@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="SJ Ordenes">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1A5276">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./css/styles.css">
+  <title>Sabor Jarocho</title>
+</head>
+<body>
+<div id="app-shell">
+
+  <!-- ===== BANNERS ===== -->
+  <div id="banner-price-warning" class="banner banner-warning hidden">
+    <span class="banner-text"></span>
+    <button id="btn-banner-admin" class="banner-btn">Ir a Admin</button>
+    <button class="banner-close" aria-label="Cerrar">×</button>
+  </div>
+
+  <div id="banner-recovery" class="banner banner-info hidden">
+    <span class="banner-text"></span>
+    <button class="banner-close" aria-label="Cerrar">×</button>
+  </div>
+
+  <!-- ===== VIEW: HOME ===== -->
+  <div id="view-home" class="view hidden">
+    <header class="app-header">
+      <h1>Sabor Jarocho</h1>
+      <div class="home-actions">
+        <button id="btn-help" class="header-btn" aria-label="Ayuda">?</button>
+        <button id="btn-new-table" class="btn-new-table">+ Nueva mesa</button>
+      </div>
+    </header>
+    <div class="view-content">
+      <div id="tables-grid" class="tables-grid"></div>
+    </div>
+    <nav class="bottom-nav">
+      <button class="nav-item active" data-view="home">
+        <span class="nav-icon">🏠</span>
+        <span>Inicio</span>
+      </button>
+      <button class="nav-item" data-view="cocina">
+        <span class="nav-icon">🍳</span>
+        <span>Cocina</span>
+      </button>
+      <button class="nav-item" data-view="admin">
+        <span class="nav-icon">⚙️</span>
+        <span>Admin</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ===== VIEW: ORDER CAPTURE ===== -->
+  <div id="view-order" class="view hidden">
+    <header class="app-header">
+      <button id="btn-back" class="back-btn" aria-label="Volver">‹</button>
+      <h1 id="order-mesa-name">Mesa</h1>
+      <span id="order-status-badge" class="status-badge status-pendiente">Capturando</span>
+      <button id="btn-cancel-table" class="header-btn header-btn-danger">Cancelar mesa</button>
+    </header>
+    <div class="order-layout">
+      <!-- Left: Menu panel -->
+      <div class="menu-panel">
+        <div id="menu-scroll" class="menu-scroll"></div>
+      </div>
+      <!-- Right: Order panel -->
+      <div class="order-panel">
+        <div id="order-scroll" class="order-scroll"></div>
+        <div class="order-footer">
+          <div class="order-summary-row">
+            <span id="order-item-count">0 artículos</span>
+            <span>
+              <span class="order-total-label">Total: </span>
+              <span id="order-subtotal" class="order-total-value">$0.00</span>
+            </span>
+          </div>
+          <button id="btn-send-kitchen" class="btn-send-kitchen">Enviar a cocina</button>
+          <button id="btn-cobrar" class="btn-cobrar hidden">Cobrar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== VIEW: KITCHEN KDS ===== -->
+  <div id="view-kitchen" class="view hidden">
+    <header class="app-header">
+      <h1>Cocina — Sabor Jarocho</h1>
+      <span id="kitchen-clock" class="kitchen-clock"></span>
+    </header>
+    <div class="view-content">
+      <div id="kitchen-grid" class="kitchen-grid"></div>
+    </div>
+    <nav class="bottom-nav">
+      <button class="nav-item" data-view="home">
+        <span class="nav-icon">🏠</span>
+        <span>Inicio</span>
+      </button>
+      <button class="nav-item active" data-view="cocina">
+        <span class="nav-icon">🍳</span>
+        <span>Cocina</span>
+      </button>
+      <button class="nav-item" data-view="admin">
+        <span class="nav-icon">⚙️</span>
+        <span>Admin</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ===== VIEW: ADMIN ===== -->
+  <div id="view-admin" class="view hidden">
+    <header class="app-header">
+      <h1>Administración</h1>
+    </header>
+    <div id="admin-content-wrapper" style="display:flex;flex-direction:column;flex:1;overflow:hidden;"></div>
+    <nav class="bottom-nav">
+      <button class="nav-item" data-view="home">
+        <span class="nav-icon">🏠</span>
+        <span>Inicio</span>
+      </button>
+      <button class="nav-item" data-view="cocina">
+        <span class="nav-icon">🍳</span>
+        <span>Cocina</span>
+      </button>
+      <button class="nav-item active" data-view="admin">
+        <span class="nav-icon">⚙️</span>
+        <span>Admin</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ===================================================
+       MODALS
+       =================================================== -->
+
+  <!-- First Launch Modal -->
+  <div id="modal-first-launch" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title">Bienvenido a Sabor Jarocho</div>
+      </div>
+      <div class="modal-body">
+        <div class="modal-text">
+          Para usar mesero y cocina al mismo tiempo en este iPad:
+          <ol>
+            <li>Abre esta app desde tu pantalla de inicio</li>
+            <li>Con la app abierta, desliza lentamente desde el borde derecho de la pantalla</li>
+            <li>Se abrirá un panel lateral — selecciona Safari</li>
+            <li>En Safari escribe:
+              <div class="modal-code">https://jonathanreyes0002.github.io/saborjarocho-pos?view=cocina</div>
+            </li>
+            <li>Arrastra el divisor para ajustar el tamaño de pantalla</li>
+          </ol>
+          <br>
+          <strong>Pantalla izquierda:</strong> Mesero &nbsp;—&nbsp; <strong>Pantalla derecha:</strong> Cocina
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-first-launch-ok" class="btn-primary">Entendido, comenzar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Nueva Mesa Modal -->
+  <div id="modal-nueva-mesa" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title">Nueva mesa</div>
+      </div>
+      <div class="modal-body">
+        <div class="form-field">
+          <label class="form-label">Nombre de la mesa</label>
+          <input type="text" id="nueva-mesa-input" placeholder="Ej: Mesa ventana, Familia García..." maxlength="60" autocomplete="off">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-nueva-mesa-cancel" class="btn-secondary">Cancelar</button>
+        <button id="btn-nueva-mesa-ok" class="btn-primary">Crear mesa</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Checkout Modal -->
+  <div id="modal-checkout" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:600px">
+      <div class="modal-header">
+        <div class="modal-title">Cobrar</div>
+        <button id="btn-checkout-cancel" class="header-btn" style="background:var(--surface-2);color:var(--text-secondary);">×</button>
+      </div>
+      <div class="modal-body">
+        <!-- Order summary -->
+        <div class="checkout-section">
+          <div class="checkout-section-title">Resumen de orden</div>
+          <div class="checkout-items-list"></div>
+          <div class="checkout-total-row">
+            <span>TOTAL</span>
+            <span class="checkout-total-amount">$0.00</span>
+          </div>
+        </div>
+
+        <!-- Payment method toggle -->
+        <div class="payment-toggle">
+          <button class="payment-toggle-btn active" data-method="efectivo">💵 Efectivo</button>
+          <button class="payment-toggle-btn" data-method="tarjeta">💳 Tarjeta</button>
+        </div>
+
+        <!-- Efectivo section -->
+        <div class="payment-section" data-method="efectivo">
+          <div class="cash-display">
+            <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px">Efectivo recibido</div>
+            <div id="cash-amount-display" class="cash-amount">$0.00</div>
+          </div>
+          <div id="cambio-display" class="cambio-display cambio-insuf">Faltan: $0.00</div>
+          <div class="quick-amounts">
+            <button class="quick-amount-btn" data-amount="50">$50</button>
+            <button class="quick-amount-btn" data-amount="100">$100</button>
+            <button class="quick-amount-btn" data-amount="150">$150</button>
+            <button class="quick-amount-btn" data-amount="200">$200</button>
+            <button class="quick-amount-btn" data-amount="500">$500</button>
+          </div>
+          <div class="numpad-grid">
+            <button class="numpad-key" data-key="1">1</button>
+            <button class="numpad-key" data-key="2">2</button>
+            <button class="numpad-key" data-key="3">3</button>
+            <button class="numpad-key" data-key="4">4</button>
+            <button class="numpad-key" data-key="5">5</button>
+            <button class="numpad-key" data-key="6">6</button>
+            <button class="numpad-key" data-key="7">7</button>
+            <button class="numpad-key" data-key="8">8</button>
+            <button class="numpad-key" data-key="9">9</button>
+            <button class="numpad-key" data-key="00">00</button>
+            <button class="numpad-key" data-key="0">0</button>
+            <button class="numpad-key numpad-backspace" data-key="⌫">⌫</button>
+          </div>
+        </div>
+
+        <!-- Tarjeta section -->
+        <div class="payment-section hidden" data-method="tarjeta">
+          <div class="card-total-display">
+            <div class="card-total-label">Total a cobrar</div>
+            <div class="checkout-total-amount card-total-amount">$0.00</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-confirm-payment" class="btn-primary" disabled>Confirmar pago</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm Dialog -->
+  <div id="modal-confirm" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:360px">
+      <div class="modal-header">
+        <div class="modal-title">Confirmar</div>
+      </div>
+      <div class="modal-body">
+        <div class="confirm-message modal-text"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-confirm-cancel btn-secondary">Cancelar</button>
+        <button class="btn-confirm-ok btn-danger">Confirmar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change PIN Modal -->
+  <div id="modal-change-pin" class="modal-overlay hidden">
+    <div class="modal-box" style="max-width:380px">
+      <div class="modal-header">
+        <div class="modal-title">Cambiar PIN</div>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
+        <div class="form-field">
+          <label class="form-label">PIN actual</label>
+          <input type="password" id="change-pin-current" inputmode="numeric" maxlength="6" placeholder="">
+        </div>
+        <div class="form-field">
+          <label class="form-label">PIN nuevo (4-6 dígitos)</label>
+          <input type="password" id="change-pin-new1" inputmode="numeric" maxlength="6" placeholder="">
+        </div>
+        <div class="form-field">
+          <label class="form-label">Confirmar PIN nuevo</label>
+          <input type="password" id="change-pin-new2" inputmode="numeric" maxlength="6" placeholder="">
+        </div>
+        <div id="change-pin-error" class="pin-error hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-change-pin-cancel" class="btn-secondary">Cancelar</button>
+        <button id="btn-do-change-pin" class="btn-primary">Guardar</button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- #app-shell -->
+
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>

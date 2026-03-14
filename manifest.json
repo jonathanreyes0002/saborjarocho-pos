@@ -1,0 +1,16 @@
+{
+  "name": "Sabor Jarocho",
+  "short_name": "SJ Ordenes",
+  "description": "Sistema de órdenes para Sabor Jarocho",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape",
+  "theme_color": "#1A5276",
+  "background_color": "#ffffff",
+  "lang": "es-MX",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
