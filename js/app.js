@@ -1710,4 +1710,3 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>`;
   });
 });
-```
