@@ -345,7 +345,7 @@ async function addItemToOrder(itemId, porcion) {
 
   // Update subtotal in DB
   const sub = calcSubtotal();
-  await updateOrder({ id_orden: currentOrderId, subtotal: sub });
+  await updateOrder(currentOrderId, { subtotal: sub });
 
   saveOrderSnapshot(currentOrderId);
   renderOrderPanel();
@@ -354,7 +354,7 @@ async function addItemToOrder(itemId, porcion) {
 async function removeItemFromOrder(idx) {
   currentOrderItems.splice(idx, 1);
   const sub = calcSubtotal();
-  await updateOrder({ id_orden: currentOrderId, subtotal: sub });
+  await updateOrder(currentOrderId, { subtotal: sub });
   saveOrderSnapshot(currentOrderId);
   renderOrderPanel();
 }
@@ -364,7 +364,7 @@ async function adjustQty(idx, delta) {
   if (!line) return;
   line.qty = Math.max(1, (line.qty || 1) + delta);
   const sub = calcSubtotal();
-  await updateOrder({ id_orden: currentOrderId, subtotal: sub });
+  await updateOrder(currentOrderId, { subtotal: sub });
   saveOrderSnapshot(currentOrderId);
   renderOrderPanel();
 }
@@ -376,7 +376,7 @@ async function holdTable() {
   if (!currentOrderId) return;
   saveOrderSnapshot(currentOrderId);
   const sub = calcSubtotal();
-  await updateOrder({ id_orden: currentOrderId, estado: 'hold', subtotal: sub });
+  await updateOrder(currentOrderId, { estado: 'hold', subtotal: sub });
   await snapshotInProgress();
   broadcast({ type: 'ORDER_HOLD', orderId: currentOrderId });
   navigate('./index.html');
@@ -405,7 +405,7 @@ function showBackActionSheet() {
     overlay.remove();
     showConfirm('¿Cancelar esta mesa? Se perderán todos los artículos.', async () => {
       localStorage.removeItem('sj_hold_' + currentOrderId);
-      await updateOrder({ id_orden: currentOrderId, estado: 'cancelada' });
+      await updateOrder(currentOrderId, { estado: 'cancelada' });
       await snapshotInProgress();
       broadcast({ type: 'ORDER_CANCELLED', orderId: currentOrderId });
       navigate('./index.html');
@@ -601,8 +601,7 @@ async function confirmPayment() {
   const now   = new Date().toISOString();
 
   // Update order
-  await updateOrder({
-    id_orden:          currentOrderId,
+  await updateOrder(currentOrderId, {
     estado:            'cobrada',
     subtotal:          effectiveTotal,
     metodo_pago:       method,
@@ -621,13 +620,17 @@ async function confirmPayment() {
   // Save detalles
   await deleteDetallesByOrder(currentOrderId);
   for (const line of currentOrderItems) {
+    const linePrice = line.porcion === 'media'
+      ? (line.item.precio_media || 0)
+      : (line.item.precio_completo || 0);
     await saveDetalle({
-      id_orden:  currentOrderId,
-      articulo:  line.item.nombre,
-      porcion:   line.porcion,
-      cantidad:  line.qty || 1,
-      precio:    line.porcion === 'media' ? (line.item.precio_media || 0) : (line.item.precio_completo || 0),
-      notas:     line.notas || ''
+      id_orden:        currentOrderId,
+      articulo:        line.item.nombre,
+      porcion:         line.porcion,
+      cantidad:        line.qty || 1,
+      precio_unitario: linePrice,
+      subtotal_linea:  linePrice * (line.qty || 1),
+      notas:           line.notas || ''
     });
   }
 
@@ -753,7 +756,7 @@ async function refreshKitchenCards() {
 
 async function markOrderReady(orderId) {
   const now = new Date().toISOString();
-  await updateOrder({ id_orden: orderId, hora_completada: now });
+  await updateOrder(orderId, { hora_completada: now });
   broadcast({ type: 'ORDER_READY', orderId });
   await refreshKitchenCards();
 }
@@ -985,7 +988,7 @@ async function renderMenuAdmin(container) {
     b.onclick = async () => {
       const id = parseInt(b.dataset.id);
       const newActivo = b.dataset.activo === 'true' ? false : true;
-      await updateMenuItem({ id_articulo: id, activo: newActivo });
+      await updateMenuItem(id, { activo: newActivo });
       renderMenuAdmin(container);
     };
   });
@@ -1055,7 +1058,7 @@ async function showMenuItemForm(itemId) {
     }
     const data = { nombre, categoria, precio_completo: precio, tiene_media: tieneMedia, precio_media: precioMedia, activo: item ? item.activo : true };
     if (item) {
-      await updateMenuItem({ ...data, id_articulo: item.id_articulo });
+      await updateMenuItem(item.id_articulo, { ...data });
     } else {
       await saveMenuItem(data);
     }
@@ -1312,7 +1315,7 @@ document.addEventListener('click', async (e) => {
   if (t.id === 'btn-cancel-table') {
     showConfirm('¿Cancelar esta mesa? Se perderán todos los artículos.', async () => {
       localStorage.removeItem('sj_hold_' + currentOrderId);
-      await updateOrder({ id_orden: currentOrderId, estado: 'cancelada' });
+      await updateOrder(currentOrderId, { estado: 'cancelada' });
       await snapshotInProgress();
       broadcast({ type: 'ORDER_CANCELLED', orderId: currentOrderId });
       navigate('./index.html');
@@ -1466,16 +1469,4 @@ document.addEventListener('keydown', (e) => {
 /* =====================================================
    BOOT
    ===================================================== */
-document.addEventListener('DOMContentLoaded', () => {
-  init().catch(err => {
-    console.error('Sabor Jarocho init error:', err);
-    document.body.innerHTML = `
-      <div style="display:flex;flex-direction:column;align-items:center;
-                  justify-content:center;height:100vh;font-family:sans-serif;
-                  padding:24px;text-align:center;">
-        <div style="font-size:48px;margin-bottom:16px">⚠️</div>
-        <h2 style="color:#c0392b;margin:0 0 8px">Error al iniciar</h2>
-        <p>${err.message || err}</p>
-      </div>`;
-  });
-});
+init();
