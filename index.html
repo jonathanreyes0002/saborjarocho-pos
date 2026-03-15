@@ -61,6 +61,7 @@
       <button id="btn-back" class="back-btn" aria-label="Volver">‹</button>
       <h1 id="order-mesa-name">Mesa</h1>
       <span id="order-status-badge" class="status-badge status-pendiente">Capturando</span>
+      <button id="btn-hold-table" class="header-btn">En espera</button>
       <button id="btn-cancel-table" class="header-btn header-btn-danger">Cancelar mesa</button>
     </header>
     <div class="order-layout">
@@ -79,8 +80,7 @@
               <span id="order-subtotal" class="order-total-value">$0.00</span>
             </span>
           </div>
-          <button id="btn-send-kitchen" class="btn-send-kitchen">Enviar a cocina</button>
-          <button id="btn-cobrar" class="btn-cobrar hidden">Cobrar</button>
+          <button id="btn-cobrar-orden" class="btn-cobrar-orden">Cobrar orden</button>
         </div>
       </div>
     </div>
@@ -133,9 +133,9 @@
     </nav>
   </div>
 
-  <!-- ===================================================
+  <!-- =================================================
        MODALS
-       =================================================== -->
+       =============================================== -->
 
   <!-- First Launch Modal -->
   <div id="modal-first-launch" class="modal-overlay hidden">
@@ -176,6 +176,7 @@
           <label class="form-label">Nombre de la mesa</label>
           <input type="text" id="nueva-mesa-input" placeholder="Ej: Mesa ventana, Familia García..." maxlength="60" autocomplete="off">
         </div>
+        <div id="nueva-mesa-error" class="pin-error hidden" style="margin-top:6px"></div>
       </div>
       <div class="modal-footer">
         <button id="btn-nueva-mesa-cancel" class="btn-secondary">Cancelar</button>
@@ -186,29 +187,75 @@
 
   <!-- Checkout Modal -->
   <div id="modal-checkout" class="modal-overlay hidden">
-    <div class="modal-box" style="max-width:600px">
+    <div class="modal-box" style="max-width:620px">
       <div class="modal-header">
         <div class="modal-title">Cobrar</div>
         <button id="btn-checkout-cancel" class="header-btn" style="background:var(--surface-2);color:var(--text-secondary);">×</button>
       </div>
       <div class="modal-body">
-        <!-- Order summary -->
+
+        <!-- 1. Order summary -->
         <div class="checkout-section">
           <div class="checkout-section-title">Resumen de orden</div>
           <div class="checkout-items-list"></div>
-          <div class="checkout-total-row">
-            <span>TOTAL</span>
-            <span class="checkout-total-amount">$0.00</span>
+          <div id="checkout-subtotal-row" class="checkout-total-row">
+            <span>SUBTOTAL</span>
+            <span class="checkout-total-amount" id="checkout-subtotal-amount">$0.00</span>
           </div>
         </div>
 
-        <!-- Payment method toggle -->
+        <!-- 2. Discount section -->
+        <div class="checkout-section discount-section">
+          <div class="checkout-section-title">Descuento</div>
+          <div class="discount-pills">
+            <button class="discount-pill active" data-pct="0">Ninguno</button>
+            <button class="discount-pill" data-pct="10">10%</button>
+            <button class="discount-pill" data-pct="20">20%</button>
+          </div>
+          <div id="discount-reason-row" class="hidden" style="margin-top:10px">
+            <input type="text" id="discount-reason" placeholder="Motivo: Cumpleaños, Referido, Cortesía..." maxlength="80">
+          </div>
+          <div id="discount-error" class="pin-error hidden" style="margin-top:4px"></div>
+        </div>
+
+        <!-- 3. Live totals breakdown (shown when discount > 0) -->
+        <div id="checkout-totals-breakdown" class="checkout-totals-breakdown hidden">
+          <div class="totals-row">
+            <span>Subtotal</span>
+            <span id="totals-subtotal-val"></span>
+          </div>
+          <div class="totals-row totals-discount">
+            <span id="totals-discount-label">Descuento (10%)</span>
+            <span id="totals-discount-amount"></span>
+          </div>
+          <div class="totals-divider"></div>
+          <div class="totals-row totals-total">
+            <span>Total a cobrar</span>
+            <span id="totals-total-val"></span>
+          </div>
+        </div>
+
+        <!-- 4. Customer info (optional) -->
+        <div class="checkout-section customer-section">
+          <div class="checkout-section-title">Cliente (opcional)</div>
+          <div class="form-row" style="gap:10px">
+            <div class="form-field">
+              <input type="email" id="customer-email" placeholder="correo@ejemplo.com" autocomplete="off" style="min-height:40px;font-size:14px">
+            </div>
+            <div class="form-field">
+              <input type="tel" id="customer-phone" placeholder="Teléfono 10 dígitos" autocomplete="off" maxlength="12" style="min-height:40px;font-size:14px">
+            </div>
+          </div>
+          <div id="customer-phone-error" class="pin-error hidden" style="margin-top:4px"></div>
+        </div>
+
+        <!-- 5. Payment method toggle -->
         <div class="payment-toggle">
           <button class="payment-toggle-btn active" data-method="efectivo">💵 Efectivo</button>
           <button class="payment-toggle-btn" data-method="tarjeta">💳 Tarjeta</button>
         </div>
 
-        <!-- Efectivo section -->
+        <!-- 6. Efectivo section -->
         <div class="payment-section" data-method="efectivo">
           <div class="cash-display">
             <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px">Efectivo recibido</div>
@@ -238,13 +285,14 @@
           </div>
         </div>
 
-        <!-- Tarjeta section -->
+        <!-- 7. Tarjeta section -->
         <div class="payment-section hidden" data-method="tarjeta">
           <div class="card-total-display">
             <div class="card-total-label">Total a cobrar</div>
-            <div class="checkout-total-amount card-total-amount">$0.00</div>
+            <div id="card-total-amount" class="card-total-amount">$0.00</div>
           </div>
         </div>
+
       </div>
       <div class="modal-footer">
         <button id="btn-confirm-payment" class="btn-primary" disabled>Confirmar pago</button>
@@ -276,16 +324,16 @@
       </div>
       <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
         <div class="form-field">
-          <label class="form-label">PIN actual</label>
-          <input type="password" id="change-pin-current" inputmode="numeric" maxlength="6" placeholder="">
+          <label class="form-label">PIN actual (4 dígitos)</label>
+          <input type="password" id="change-pin-current" inputmode="numeric" maxlength="4" placeholder="">
         </div>
         <div class="form-field">
-          <label class="form-label">PIN nuevo (4-6 dígitos)</label>
-          <input type="password" id="change-pin-new1" inputmode="numeric" maxlength="6" placeholder="">
+          <label class="form-label">PIN nuevo (4 dígitos)</label>
+          <input type="password" id="change-pin-new1" inputmode="numeric" maxlength="4" placeholder="">
         </div>
         <div class="form-field">
           <label class="form-label">Confirmar PIN nuevo</label>
-          <input type="password" id="change-pin-new2" inputmode="numeric" maxlength="6" placeholder="">
+          <input type="password" id="change-pin-new2" inputmode="numeric" maxlength="4" placeholder="">
         </div>
         <div id="change-pin-error" class="pin-error hidden"></div>
       </div>
