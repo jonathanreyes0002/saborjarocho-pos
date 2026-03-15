@@ -9,6 +9,15 @@ const DB_VERSION = 2;
 
 let _db = null;
 
+/* =====================================================
+   PIECE-BASED CATEGORIES
+   ===================================================== */
+export const PIECE_CATEGORIES = ['Empanadas', 'Chiles rellenos', 'Garnachas', 'Picaditas', 'Tostadas'];
+
+export function isPieceCategory(categoria) {
+  return PIECE_CATEGORIES.includes(categoria);
+}
+
 /**
  * Open (or create) the IndexedDB database.
  */
@@ -47,7 +56,6 @@ export function openDB() {
 
       /* ── Version 2: add new fields to existing records via cursors ── */
       if (oldVersion >= 1 && oldVersion < 2) {
-        // Migrate detalle_orden — add notas field
         tx.objectStore('detalle_orden').openCursor().onsuccess = (e) => {
           const cursor = e.target.result;
           if (cursor) {
@@ -57,7 +65,6 @@ export function openDB() {
           }
         };
 
-        // Migrate ordenes — add customer + discount fields
         tx.objectStore('ordenes').openCursor().onsuccess = (e) => {
           const cursor = e.target.result;
           if (cursor) {
@@ -77,11 +84,7 @@ export function openDB() {
 
     req.onsuccess = (event) => {
       _db = event.target.result;
-      if (!localStorage.getItem('sj_seeded')) {
-        seedMenu(_db).then(() => resolve(_db));
-      } else {
-        resolve(_db);
-      }
+      seedMenuIfEmpty(_db).then(() => resolve(_db));
     };
 
     req.onerror = (event) => reject(event.target.error);
@@ -89,23 +92,23 @@ export function openDB() {
 }
 
 /* =====================================================
-   MENU SEEDING (with real default prices)
+   MENU SEEDING (count-guarded — never seeds twice)
    ===================================================== */
 const SEED_DATA = [
-  { categoria: 'Empanadas',       nombre: 'Queso',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
-  { categoria: 'Empanadas',       nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
-  { categoria: 'Empanadas',       nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 3 },
-  { categoria: 'Chiles rellenos', nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
-  { categoria: 'Chiles rellenos', nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
-  { categoria: 'Tostadas',        nombre: 'Deshebrada',        tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
-  { categoria: 'Tostadas',        nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
-  { categoria: 'Tostadas',        nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 3 },
-  { categoria: 'Garnachas',       nombre: 'Deshebrada',        tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
-  { categoria: 'Picaditas',       nombre: 'Salsa',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
-  { categoria: 'Picaditas',       nombre: 'Frijoles',          tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
-  { categoria: 'Picaditas',       nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 3 },
-  { categoria: 'Picaditas',       nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 4 },
-  { categoria: 'Picaditas',       nombre: 'Deshebrada',        tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 5 },
+  { categoria: 'Empanadas',       nombre: 'Queso',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
+  { categoria: 'Empanadas',       nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
+  { categoria: 'Empanadas',       nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
+  { categoria: 'Chiles rellenos', nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
+  { categoria: 'Chiles rellenos', nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
+  { categoria: 'Tostadas',        nombre: 'Deshebrada',        tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
+  { categoria: 'Tostadas',        nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
+  { categoria: 'Tostadas',        nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
+  { categoria: 'Garnachas',       nombre: 'Deshebrada',        tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
+  { categoria: 'Picaditas',       nombre: 'Salsa',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
+  { categoria: 'Picaditas',       nombre: 'Frijoles',          tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
+  { categoria: 'Picaditas',       nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
+  { categoria: 'Picaditas',       nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 4 },
+  { categoria: 'Picaditas',       nombre: 'Deshebrada',        tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 5 },
   { categoria: 'Platillos',       nombre: 'Plátanos rellenos', tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
   { categoria: 'Platillos',       nombre: 'Plátanos fritos',   tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
   { categoria: 'Platillos',       nombre: 'Papas preparadas',  tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
@@ -116,40 +119,47 @@ const SEED_DATA = [
   { categoria: 'Bebidas',         nombre: 'Agua natural',      tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 3 },
 ];
 
-async function seedMenu(db) {
+function seedMenuIfEmpty(db) {
   return new Promise((resolve, reject) => {
     const tx    = db.transaction('menu_articulos', 'readwrite');
     const store = tx.objectStore('menu_articulos');
-    const now   = new Date().toISOString();
 
-    SEED_DATA.forEach(item => {
-      store.add({
-        categoria:          item.categoria,
-        nombre:             item.nombre,
-        precio_completo:    item.precio_completo,
-        precio_media:       item.precio_media,
-        tiene_media:        item.tiene_media,
-        activo:             true,
-        orden_display:      item.orden_display,
-        fecha_modificacion: now
+    const countReq = store.count();
+    countReq.onsuccess = () => {
+      if (countReq.result > 0) {
+        // Items already exist — skip seeding entirely
+        localStorage.setItem('sj_seeded', 'true');
+        resolve();
+        return;
+      }
+      // DB is empty — seed
+      const now = new Date().toISOString();
+      SEED_DATA.forEach(item => {
+        store.add({
+          categoria:          item.categoria,
+          nombre:             item.nombre,
+          precio_completo:    item.precio_completo,
+          precio_media:       item.precio_media,
+          tiene_media:        item.tiene_media,
+          activo:             true,
+          orden_display:      item.orden_display,
+          fecha_modificacion: now,
+        });
       });
-    });
-
-    tx.oncomplete = () => { localStorage.setItem('sj_seeded', 'true'); resolve(); };
-    tx.onerror    = (e) => reject(e.target.error);
+      tx.oncomplete = () => { localStorage.setItem('sj_seeded', 'true'); resolve(); };
+      tx.onerror    = (e) => reject(e.target.error);
+    };
+    countReq.onerror = (e) => reject(e.target.error);
   });
 }
 
 /**
  * One-time price migration for existing installs that have precio_completo = 0.
- * Key: sj_prices_seeded_v2
  */
 export async function migratePricesV2() {
   if (localStorage.getItem('sj_prices_seeded_v2') === 'true') return;
 
-  const db    = await openDB();
-  const items = await getMenuItems();
-
+  const items      = await getMenuItems();
   const zeroPriced = items.filter(i => i.precio_completo === 0);
   if (zeroPriced.length === 0) {
     localStorage.setItem('sj_prices_seeded_v2', 'true');
@@ -158,15 +168,37 @@ export async function migratePricesV2() {
 
   for (const item of zeroPriced) {
     if (item.categoria === 'Bebidas') {
-      await updateMenuItem(item.id_articulo, { precio_completo: 30, precio_media: null });
+      await updateMenuItem(item.id_articulo, { precio_completo: 30, precio_media: null, tiene_media: false });
     } else {
-      const updates = { precio_completo: 160 };
-      if (item.tiene_media) updates.precio_media = 80;
+      const updates = { precio_completo: 160, tiene_media: false, precio_media: null };
       await updateMenuItem(item.id_articulo, updates);
     }
   }
 
   localStorage.setItem('sj_prices_seeded_v2', 'true');
+}
+
+/**
+ * One-time deduplication: removes duplicate menu items (same categoria+nombre).
+ * Keeps the record with the highest id_articulo (most recently inserted).
+ * Protected by localStorage key 'sj_dedup_done'.
+ */
+export async function dedupMenuItems() {
+  const all    = await getMenuItems({});
+  const groups = {};
+  for (const item of all) {
+    const key = `${item.categoria}|${item.nombre.toLowerCase().trim()}`;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(item);
+  }
+  for (const group of Object.values(groups)) {
+    if (group.length <= 1) continue;
+    // Keep highest id (most recently inserted / most correct after migration)
+    group.sort((a, b) => b.id_articulo - a.id_articulo);
+    for (const dup of group.slice(1)) {
+      await deleteMenuItem(dup.id_articulo);
+    }
+  }
 }
 
 /* =====================================================
@@ -243,9 +275,6 @@ export async function getOrder(id_orden) {
   });
 }
 
-/**
- * Open orders shown on Home: pendiente + hold (not cobrada/cancelada).
- */
 export async function getOpenOrders() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -260,9 +289,6 @@ export async function getOpenOrders() {
   });
 }
 
-/**
- * Kitchen orders: cobrada + hora_completada IS NULL (paid but not yet ready).
- */
 export async function getKitchenOrders() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -292,7 +318,7 @@ export async function saveDetalle(data) {
     const store = tx.objectStore('detalle_orden');
     const req   = store.add({
       id_orden:        data.id_orden,
-      categoria:       data.categoria,
+      categoria:       data.categoria       || '',
       articulo:        data.articulo,
       porcion:         data.porcion         || 'completa',
       cantidad:        data.cantidad        || 1,
