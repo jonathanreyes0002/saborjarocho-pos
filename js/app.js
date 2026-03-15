@@ -1,5 +1,5 @@
 /**
- * app.js — Main controller for Sabor Jarocho PWA
+ * app.js — Main controller for Sabor Jarocho PWA  v1.1
  * Routing, view rendering, event delegation, crash recovery
  */
 
@@ -8,7 +8,8 @@ import {
   saveDetalle, getDetallesByOrder, deleteDetallesByOrder,
   getMenuItems, saveMenuItem, updateMenuItem, deleteMenuItem,
   getMenuItemById, snapshotInProgress, recoverOrders,
-  generateFolio, todayStr, getOrdersByDate
+  generateFolio, todayStr, getOrdersByDate,
+  getKitchenOrders, migratePricesV2
 } from './db.js';
 import { broadcast, listenSync } from './sync.js';
 import {
@@ -20,16 +21,24 @@ import { getTodayStats, getTopItems, getHourlyRevenue, renderHourlyChart } from 
 /* =====================================================
    STATE
    ===================================================== */
-let currentOrderId  = null;  // active order being captured
-let currentOrderItems = [];  // in-memory line items [{item, porcion}]
-let adminUnlocked   = false; // PIN verified this session
-let kitchenTimer    = null;  // interval for elapsed time
-let checkoutData    = null;  // data for checkout overlay
+let currentOrderId    = null;  // active order being captured
+let currentOrderItems = [];    // in-memory line items [{item, porcion, notas}]
+let adminUnlocked     = false; // PIN verified this session
+let kitchenTimer      = null;  // interval for elapsed time
+let checkoutData      = null;  // data for checkout overlay
+let discountPct       = 0;     // current discount percentage (0, 10, or 20)
 
 /* =====================================================
    INIT
    ===================================================== */
 async function init() {
+  // PIN migration — enforce exactly 4 digits
+  const pinMeta = localStorage.getItem('sj_pin_length');
+  if (!pinMeta || pinMeta !== '4') {
+    localStorage.removeItem('sj_admin_pin');
+    localStorage.setItem('sj_pin_length', '4');
+  }
+
   // Register service worker
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('./service-worker.js', { scope: './' }).catch(() => {});
@@ -42,6 +51,9 @@ async function init() {
 
   // Open DB
   await openDB();
+
+  // Price migration (one-time)
+  await migratePricesV2();
 
   // Crash recovery
   const recovered = await recoverOrders();
@@ -118,1583 +130,1340 @@ function hideModal(id) {
   if (el) el.classList.add('hidden');
 }
 
-function showConfirm(message, onConfirm) {
+function showConfirm(message, onConfirm, dangerLabel = 'Confirmar') {
   const modal = document.getElementById('modal-confirm');
-  const msgEl = modal.querySelector('.confirm-message');
+  if (!modal) return;
+  modal.querySelector('.confirm-message').textContent = message;
   const okBtn = modal.querySelector('.btn-confirm-ok');
-  if (msgEl) msgEl.textContent = message;
-  const newOk = okBtn.cloneNode(true);
-  okBtn.parentNode.replaceChild(newOk, okBtn);
-  newOk.addEventListener('click', () => {
-    hideModal('modal-confirm');
-    onConfirm();
-  });
+  okBtn.textContent = dangerLabel;
+  okBtn.onclick = () => { hideModal('modal-confirm'); onConfirm(); };
+  modal.querySelector('.btn-confirm-cancel').onclick = () => hideModal('modal-confirm');
   showModal('modal-confirm');
 }
 
-/* =====================================================
-   SHOW / HIDE VIEWS
-   ===================================================== */
-function showView(id) {
-  document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
-  const el = document.getElementById(id);
-  if (el) el.classList.remove('hidden');
-}
-
-/* =====================================================
-   FORMAT HELPERS
-   ===================================================== */
-function fmtMXN(n) {
-  return Number(n || 0).toLocaleString('es-MX', { style: 'currency', currency: 'MXN' });
-}
-
-function timeAgo(isoStr) {
-  if (!isoStr) return '';
-  const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 60000);
-  if (diff < 1)  return 'Abierta hace un momento';
-  if (diff === 1) return 'Abierta hace 1 min';
-  return `Abierta hace ${diff} min`;
-}
-
-function elapsedMin(isoStr) {
-  if (!isoStr) return 0;
-  return Math.floor((Date.now() - new Date(isoStr).getTime()) / 60000);
-}
-
-function statusLabel(estado) {
-  switch (estado) {
-    case 'pendiente':  return 'Capturando';
-    case 'en_cocina':  return 'En cocina';
-    case 'lista':      return 'Lista para cobrar';
-    default:           return estado;
+function showToast(message, duration = 3000) {
+  let toast = document.getElementById('sj-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'sj-toast';
+    toast.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 20px;border-radius:8px;font-size:14px;z-index:9999;pointer-events:none;transition:opacity 0.3s;';
+    document.body.appendChild(toast);
   }
-}
-
-function statusClass(estado) {
-  switch (estado) {
-    case 'pendiente': return 'status-pendiente';
-    case 'en_cocina': return 'status-en_cocina';
-    case 'lista':     return 'status-lista';
-    default:          return 'status-pendiente';
-  }
+  toast.textContent = message;
+  toast.style.opacity = '1';
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => { toast.style.opacity = '0'; }, duration);
 }
 
 /* =====================================================
-   HOME VIEW
+   VIEW: HOME
    ===================================================== */
 async function renderHome() {
   showView('view-home');
-  updateNavActive('home');
-  await refreshTableCards();
 
-  listenSync(async (msg) => {
-    await refreshTableCards();
-  });
-}
+  // Check for ticket-sent signal
+  const sentEmail = localStorage.getItem('sj_ticket_just_sent');
+  if (sentEmail) {
+    localStorage.removeItem('sj_ticket_just_sent');
+    showToast(`Ticket enviado a ${sentEmail}`);
+  }
 
-async function refreshTableCards() {
   const grid = document.getElementById('tables-grid');
   if (!grid) return;
 
   const orders = await getOpenOrders();
   if (orders.length === 0) {
-    grid.innerHTML = `
-      <div class="empty-state" style="grid-column:span 2">
-        <div class="empty-state-icon">🍽️</div>
-        <div class="empty-state-text">Sin mesas abiertas</div>
-        <div class="empty-state-sub">Toca "+ Nueva mesa" para comenzar</div>
-      </div>`;
+    grid.innerHTML = '<div class="empty-state">No hay mesas abiertas.<br>Toca <strong>+ Nueva mesa</strong> para comenzar.</div>';
     return;
   }
 
-  // Collect detalles for each order to show item count
-  const cards = await Promise.all(orders.map(async (order) => {
-    const detalles = await getDetallesByOrder(order.id_orden);
-    const itemCount = detalles.reduce((s, d) => s + (d.cantidad || 1), 0);
-    return { order, detalles, itemCount };
-  }));
+  grid.innerHTML = orders.map(o => {
+    const snap = localStorage.getItem('sj_hold_' + o.id_orden);
+    const items = snap ? JSON.parse(snap) : [];
+    const itemCount = items.reduce((s, l) => s + (l.qty || 1), 0);
+    const subtotal = snap ? calcSubtotalFromItems(items) : (o.subtotal || 0);
+    return `
+      <div class="table-card status-${o.estado}" data-order-id="${o.id_orden}">
+        <div class="table-card-name">${esc(o.nombre_mesa)}</div>
+        <div class="table-card-status">${statusLabel(o.estado)}</div>
+        <div class="table-card-info">${itemCount} artículo${itemCount !== 1 ? 's' : ''} · $${subtotal.toFixed(2)}</div>
+      </div>`;
+  }).join('');
+}
 
-  grid.innerHTML = cards.map(({ order, itemCount }) => `
-    <div class="table-card" data-order-id="${order.id_orden}">
-      <div class="table-card-header">
-        <div class="table-card-name">${escHtml(order.nombre_mesa)}</div>
-        <span class="status-badge ${statusClass(order.estado)}">${statusLabel(order.estado)}</span>
-      </div>
-      <div class="table-card-meta">${timeAgo(order.hora_orden)}</div>
-      <div class="table-card-footer">
-        <span>${itemCount} artículo${itemCount !== 1 ? 's' : ''}</span>
-        <span class="table-card-total">${fmtMXN(order.subtotal)}</span>
-      </div>
-    </div>
-  `).join('');
+function calcSubtotalFromItems(items) {
+  return items.reduce((sum, line) => {
+    const price = line.porcion === 'media' ? (line.item.precio_media || 0) : (line.item.precio_completo || 0);
+    return sum + price * (line.qty || 1);
+  }, 0);
 }
 
 /* =====================================================
-   ORDER CAPTURE VIEW
+   VIEW: ORDER CAPTURE
    ===================================================== */
 async function renderOrderCapture(orderId) {
-  currentOrderId    = orderId;
-  currentOrderItems = [];
+  showView('view-order');
+  currentOrderId = orderId;
 
   const order = await getOrder(orderId);
   if (!order) { navigate('./index.html'); return; }
 
-  // Restore items if order already had detalles
-  const existingDetalles = await getDetallesByOrder(orderId);
-  currentOrderItems = existingDetalles.map(d => ({
-    id_detalle:     d.id_detalle,
-    item: {
-      id_articulo:     null,
-      nombre:          d.articulo,
-      categoria:       d.categoria,
-      precio_completo: d.porcion === 'completa' ? d.precio_unitario : d.precio_unitario * 2,
-      precio_media:    d.porcion === 'media'    ? d.precio_unitario : null,
-      tiene_media:     d.porcion === 'media'
-    },
-    porcion: d.porcion
-  }));
+  // Restore from snapshot first (for hold/pendiente)
+  const snap = localStorage.getItem('sj_hold_' + orderId);
+  if (snap && (order.estado === 'pendiente' || order.estado === 'hold')) {
+    try { currentOrderItems = JSON.parse(snap); } catch { currentOrderItems = []; }
+  } else {
+    currentOrderItems = [];
+  }
 
-  showView('view-order');
-
-  // Render header info
-  document.getElementById('order-mesa-name').textContent  = order.nombre_mesa;
-  const badge = document.getElementById('order-status-badge');
-  badge.textContent  = statusLabel(order.estado);
-  badge.className    = `status-badge ${statusClass(order.estado)}`;
-
-  // Render menu
-  await renderMenuPanel();
-  renderOrderPanel(order);
-
-  // BroadcastChannel listener — update status if kitchen marks ready
-  listenSync(async (msg) => {
-    if (msg.type === 'ORDER_READY' && msg.orderId === currentOrderId) {
-      const updated = await getOrder(currentOrderId);
-      if (updated) updateOrderHeader(updated);
-    }
-  });
-}
-
-function updateOrderHeader(order) {
+  // Update header
+  const nameEl = document.getElementById('order-mesa-name');
+  if (nameEl) nameEl.textContent = order.nombre_mesa;
   const badge = document.getElementById('order-status-badge');
   if (badge) {
     badge.textContent = statusLabel(order.estado);
-    badge.className   = `status-badge ${statusClass(order.estado)}`;
+    badge.className = 'status-badge ' + statusClass(order.estado);
   }
-  const cobrarBtn = document.getElementById('btn-cobrar');
-  if (cobrarBtn) {
-    cobrarBtn.classList.toggle('hidden', order.estado !== 'lista');
-  }
-  const sendBtn = document.getElementById('btn-send-kitchen');
-  if (sendBtn) {
-    if (order.estado === 'en_cocina') {
-      sendBtn.textContent = 'Orden enviada ✓';
-      sendBtn.disabled    = true;
-    } else if (order.estado === 'lista') {
-      sendBtn.textContent = 'Enviar a cocina';
-      sendBtn.disabled    = false;
-    }
-  }
+
+  // Render both panels
+  await renderMenuPanel();
+  renderOrderPanel();
 }
 
 async function renderMenuPanel() {
-  const menuScroll = document.getElementById('menu-scroll');
-  if (!menuScroll) return;
+  const scroll = document.getElementById('menu-scroll');
+  if (!scroll) return;
 
-  const items = await getMenuItems();
+  const items = await getMenuItems({ activo: true });
   if (items.length === 0) {
-    menuScroll.innerHTML = '<div class="order-empty">Sin artículos en el menú</div>';
+    scroll.innerHTML = '<div class="empty-state">No hay artículos en el menú.<br>Agrégalos en Admin → Menú.</div>';
     return;
   }
 
   // Group by category
-  const byCategory = {};
-  items.forEach(item => {
-    if (!byCategory[item.categoria]) byCategory[item.categoria] = [];
-    byCategory[item.categoria].push(item);
-  });
+  const cats = {};
+  for (const item of items) {
+    if (!cats[item.categoria]) cats[item.categoria] = [];
+    cats[item.categoria].push(item);
+  }
 
-  menuScroll.innerHTML = Object.entries(byCategory).map(([cat, catItems]) => `
+  const isBebida = (item) => item.categoria === 'Bebidas';
+
+  scroll.innerHTML = Object.entries(cats).map(([cat, catItems]) => `
     <div class="menu-category">
-      <div class="menu-category-header">${escHtml(cat)}</div>
-      ${catItems.map(item => {
-        const disabled = item.precio_completo === 0;
-        const halfBtn  = item.tiene_media
-          ? `<button class="btn-add-half btn-add-item-half" data-id="${item.id_articulo}" ${disabled ? 'disabled' : ''}>½</button>`
-          : '';
-        const priceStr = item.precio_completo > 0
-          ? fmtMXN(item.precio_completo)
-          : '<span style="color:var(--danger-text);font-size:12px;">Sin precio</span>';
-        return `
-          <div class="menu-item-row ${disabled ? 'disabled' : ''}">
-            <div class="menu-item-info">
-              <div class="menu-item-name">${escHtml(item.nombre)}</div>
-              <div class="menu-item-price">${priceStr}${item.tiene_media && item.precio_media > 0 ? ` · ½ ${fmtMXN(item.precio_media)}` : ''}</div>
-            </div>
-            <div class="menu-item-btns">
-              ${halfBtn}
-              <button class="btn-add-item btn-add-item-full" data-id="${item.id_articulo}" ${disabled ? 'disabled' : ''}>1 orden</button>
-            </div>
-          </div>`;
-      }).join('')}
+      <div class="menu-category-title">${esc(cat)}</div>
+      ${catItems.map(item => `
+        <div class="menu-item-row">
+          <div class="menu-item-name">${esc(item.nombre)}</div>
+          <div class="menu-item-prices">
+            <button class="btn-add-item btn-add-full"
+              data-item-id="${item.id_articulo}"
+              data-porcion="${isBebida(item) ? 'unidad' : 'completa'}">
+              ${isBebida(item) ? '1 unidad' : '1 orden'} — $${(item.precio_completo || 0).toFixed(2)}
+            </button>
+            ${item.tiene_media && !isBebida(item) ? `
+            <button class="btn-add-item btn-add-media"
+              data-item-id="${item.id_articulo}"
+              data-porcion="media">
+              ½ orden — $${(item.precio_media || 0).toFixed(2)}
+            </button>` : ''}
+          </div>
+        </div>
+      `).join('')}
     </div>
   `).join('');
 }
 
-function renderOrderPanel(order) {
-  const orderScroll  = document.getElementById('order-scroll');
-  const summaryCount = document.getElementById('order-item-count');
-  const summaryTotal = document.getElementById('order-subtotal');
-  const cobrarBtn    = document.getElementById('btn-cobrar');
-  const sendBtn      = document.getElementById('btn-send-kitchen');
-
-  if (!orderScroll) return;
+function renderOrderPanel() {
+  const scroll = document.getElementById('order-scroll');
+  if (!scroll) return;
 
   if (currentOrderItems.length === 0) {
-    orderScroll.innerHTML = '<div class="order-empty">Sin artículos — agrega del menú</div>';
+    scroll.innerHTML = '<div class="empty-state" style="padding:24px 16px;text-align:center;color:var(--text-secondary)">Toca los artículos del menú para agregar.</div>';
   } else {
-    orderScroll.innerHTML = currentOrderItems.map((line, idx) => {
-      const precio = line.porcion === 'media'
-        ? (line.item.precio_media || 0)
-        : (line.item.precio_completo || 0);
+    scroll.innerHTML = currentOrderItems.map((line, idx) => {
+      const isUnidad = line.porcion === 'unidad';
+      const isMedia  = line.porcion === 'media';
+      const badgeText  = isUnidad ? '1 unidad' : (isMedia ? '½ orden' : '1 orden');
+      const badgeClass = isMedia ? 'portion-media' : 'portion-completa';
+      const price = isMedia ? (line.item.precio_media || 0) : (line.item.precio_completo || 0);
+      const lineTotal = price * (line.qty || 1);
+
       return `
-        <div class="order-item-row" data-line="${idx}">
-          <div class="order-item-info">
-            <div class="order-item-name">${escHtml(line.item.nombre)}</div>
-            <span class="portion-badge ${line.porcion === 'media' ? 'portion-media' : 'portion-completa'}">
-              ${line.porcion === 'media' ? '½ orden' : '1 orden'}
-            </span>
+        <div class="order-item-block">
+          <div class="order-item-row">
+            <div class="order-item-left">
+              <span class="portion-badge ${badgeClass}">${badgeText}</span>
+              <span class="order-item-name">${esc(line.item.nombre)}</span>
+            </div>
+            <div class="order-item-right">
+              <span class="order-item-price">$${lineTotal.toFixed(2)}</span>
+              <div class="qty-controls">
+                <button class="qty-btn btn-qty-dec" data-idx="${idx}">−</button>
+                <span class="qty-value">${line.qty || 1}</span>
+                <button class="qty-btn btn-qty-inc" data-idx="${idx}">+</button>
+              </div>
+              <button class="btn-remove-item" data-idx="${idx}" aria-label="Quitar">×</button>
+            </div>
           </div>
-          <div class="order-item-price">${fmtMXN(precio)}</div>
-          <button class="btn-remove-item" data-remove="${idx}">×</button>
+          <input type="text" class="item-notes-input" data-line-idx="${idx}"
+            value="${escAttr(line.notas || '')}"
+            placeholder="Notas: sin cebolla, sin salsa..."
+            maxlength="100">
         </div>`;
     }).join('');
   }
 
+  // Update footer summary
   const subtotal = calcSubtotal();
-  const count    = currentOrderItems.length;
-  if (summaryCount) summaryCount.textContent = `${count} artículo${count !== 1 ? 's' : ''}`;
-  if (summaryTotal) summaryTotal.textContent = fmtMXN(subtotal);
-
-  if (cobrarBtn) cobrarBtn.classList.toggle('hidden', order.estado !== 'lista');
-
-  if (sendBtn) {
-    if (order.estado === 'en_cocina') {
-      sendBtn.textContent = 'Orden enviada ✓';
-      sendBtn.disabled    = true;
-    } else {
-      sendBtn.textContent = 'Enviar a cocina';
-      sendBtn.disabled    = false;
-    }
-  }
+  const countEl = document.getElementById('order-item-count');
+  const totalEl = document.getElementById('order-subtotal');
+  const totalCount = currentOrderItems.reduce((s, l) => s + (l.qty || 1), 0);
+  if (countEl) countEl.textContent = `${totalCount} artículo${totalCount !== 1 ? 's' : ''}`;
+  if (totalEl) totalEl.textContent = `$${subtotal.toFixed(2)}`;
 }
 
 function calcSubtotal() {
-  return currentOrderItems.reduce((sum, line) => {
-    const precio = line.porcion === 'media'
-      ? (line.item.precio_media || 0)
-      : (line.item.precio_completo || 0);
-    return sum + precio;
-  }, 0);
+  return calcSubtotalFromItems(currentOrderItems);
+}
+
+function saveOrderSnapshot(orderId) {
+  if (!orderId) return;
+  localStorage.setItem('sj_hold_' + orderId, JSON.stringify(currentOrderItems));
 }
 
 async function addItemToOrder(itemId, porcion) {
   const item = await getMenuItemById(itemId);
   if (!item) return;
 
-  currentOrderItems.push({ item, porcion });
+  const existing = currentOrderItems.find(l => l.item.id_articulo === itemId && l.porcion === porcion);
+  if (existing) {
+    existing.qty = (existing.qty || 1) + 1;
+  } else {
+    currentOrderItems.push({ item, porcion, qty: 1, notas: '' });
+  }
 
-  const subtotal = calcSubtotal();
-  await updateOrder(currentOrderId, { subtotal });
-  await snapshotInProgress();
+  // Update subtotal in DB
+  const sub = calcSubtotal();
+  await updateOrder({ id_orden: currentOrderId, subtotal: sub });
 
-  const order = await getOrder(currentOrderId);
-  renderOrderPanel(order);
+  saveOrderSnapshot(currentOrderId);
+  renderOrderPanel();
 }
 
 async function removeItemFromOrder(idx) {
   currentOrderItems.splice(idx, 1);
-  const subtotal = calcSubtotal();
-  await updateOrder(currentOrderId, { subtotal });
-  await snapshotInProgress();
-
-  const order = await getOrder(currentOrderId);
-  renderOrderPanel(order);
+  const sub = calcSubtotal();
+  await updateOrder({ id_orden: currentOrderId, subtotal: sub });
+  saveOrderSnapshot(currentOrderId);
+  renderOrderPanel();
 }
 
-async function sendToKitchen() {
-  if (currentOrderItems.length === 0) {
-    alert('Agrega al menos un artículo antes de enviar a cocina.');
-    return;
-  }
-
-  const folio    = generateFolio();
-  const subtotal = calcSubtotal();
-  const now      = new Date().toISOString();
-
-  // Save detalles (replace any existing)
-  await deleteDetallesByOrder(currentOrderId);
-  for (const line of currentOrderItems) {
-    const precio = line.porcion === 'media'
-      ? (line.item.precio_media || 0)
-      : (line.item.precio_completo || 0);
-    await saveDetalle({
-      id_orden:        currentOrderId,
-      categoria:       line.item.categoria,
-      articulo:        line.item.nombre,
-      porcion:         line.porcion,
-      cantidad:        1,
-      precio_unitario: precio,
-      subtotal_linea:  precio
-    });
-  }
-
-  await updateOrder(currentOrderId, {
-    estado:              'en_cocina',
-    hora_enviada_cocina: now,
-    folio,
-    subtotal
-  });
-
-  await snapshotInProgress();
-  broadcast({ type: 'ORDER_TO_KITCHEN', orderId: currentOrderId, nombreMesa: (await getOrder(currentOrderId)).nombre_mesa });
-
-  const order = await getOrder(currentOrderId);
-  updateOrderHeader(order);
-
-  const sendBtn = document.getElementById('btn-send-kitchen');
-  if (sendBtn) {
-    sendBtn.textContent = 'Orden enviada ✓';
-    sendBtn.disabled    = true;
-  }
-}
-
-async function cancelTable() {
-  showConfirm('¿Cancelar esta mesa? Se perderán los artículos.', async () => {
-    await updateOrder(currentOrderId, { estado: 'cancelada' });
-    await snapshotInProgress();
-    broadcast({ type: 'ORDER_CANCELLED', orderId: currentOrderId });
-    navigate('./index.html');
-  });
+async function adjustQty(idx, delta) {
+  const line = currentOrderItems[idx];
+  if (!line) return;
+  line.qty = Math.max(1, (line.qty || 1) + delta);
+  const sub = calcSubtotal();
+  await updateOrder({ id_orden: currentOrderId, subtotal: sub });
+  saveOrderSnapshot(currentOrderId);
+  renderOrderPanel();
 }
 
 /* =====================================================
-   CHECKOUT OVERLAY
+   HOLD TABLE / BACK ACTION SHEET
    ===================================================== */
-async function openCheckout() {
-  const order    = await getOrder(currentOrderId);
-  const detalles = await getDetallesByOrder(currentOrderId);
-  checkoutData   = { order, detalles };
+async function holdTable() {
+  if (!currentOrderId) return;
+  saveOrderSnapshot(currentOrderId);
+  const sub = calcSubtotal();
+  await updateOrder({ id_orden: currentOrderId, estado: 'hold', subtotal: sub });
+  await snapshotInProgress();
+  broadcast({ type: 'ORDER_HOLD', orderId: currentOrderId });
+  navigate('./index.html');
+}
 
-  const overlay = document.getElementById('modal-checkout');
+function showBackActionSheet() {
+  // Remove any existing sheet
+  const existing = document.getElementById('sj-action-sheet-overlay');
+  if (existing) existing.remove();
 
-  // Build order summary
-  const summaryEl = overlay.querySelector('.checkout-items-list');
-  if (summaryEl) {
-    summaryEl.innerHTML = detalles.map(d => `
-      <div class="checkout-item-row">
-        <span>${escHtml(d.articulo)} <small style="color:var(--text-secondary)">${d.porcion === 'media' ? '½' : '1x'}</small></span>
-        <span>${fmtMXN(d.subtotal_linea)}</span>
-      </div>`).join('');
+  const overlay = document.createElement('div');
+  overlay.id = 'sj-action-sheet-overlay';
+  overlay.className = 'action-sheet-overlay';
+
+  overlay.innerHTML = `
+    <div class="action-sheet">
+      <button class="action-sheet-btn" id="as-hold">Poner en espera</button>
+      <button class="action-sheet-btn action-sheet-btn-danger" id="as-cancel">Cancelar mesa</button>
+      <button class="action-sheet-btn action-sheet-btn-secondary" id="as-continue">Seguir capturando</button>
+    </div>`;
+
+  document.body.appendChild(overlay);
+
+  document.getElementById('as-hold').onclick = () => { overlay.remove(); holdTable(); };
+  document.getElementById('as-cancel').onclick = () => {
+    overlay.remove();
+    showConfirm('¿Cancelar esta mesa? Se perderán todos los artículos.', async () => {
+      localStorage.removeItem('sj_hold_' + currentOrderId);
+      await updateOrder({ id_orden: currentOrderId, estado: 'cancelada' });
+      await snapshotInProgress();
+      broadcast({ type: 'ORDER_CANCELLED', orderId: currentOrderId });
+      navigate('./index.html');
+    }, 'Cancelar mesa');
+  };
+  document.getElementById('as-continue').onclick = () => overlay.remove();
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+/* =====================================================
+   VIEW: CHECKOUT
+   ===================================================== */
+function getEffectiveTotal() {
+  return calcSubtotal() * (1 - discountPct / 100);
+}
+
+function openCheckout() {
+  // Reset discount
+  discountPct = 0;
+  document.querySelectorAll('.discount-pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.pct === '0');
+  });
+  const reasonRow = document.getElementById('discount-reason-row');
+  if (reasonRow) reasonRow.classList.add('hidden');
+  const discountInput = document.getElementById('discount-reason');
+  if (discountInput) discountInput.value = '';
+  const discountErr = document.getElementById('discount-error');
+  if (discountErr) { discountErr.textContent = ''; discountErr.classList.add('hidden'); }
+  const breakdown = document.getElementById('checkout-totals-breakdown');
+  if (breakdown) breakdown.classList.add('hidden');
+
+  // Reset customer fields
+  const emailEl = document.getElementById('customer-email');
+  const phoneEl = document.getElementById('customer-phone');
+  if (emailEl) emailEl.value = '';
+  if (phoneEl) phoneEl.value = '';
+  const phoneErr = document.getElementById('customer-phone-error');
+  if (phoneErr) { phoneErr.textContent = ''; phoneErr.classList.add('hidden'); }
+
+  // Populate order summary
+  const listEl = document.querySelector('.checkout-items-list');
+  if (listEl) {
+    listEl.innerHTML = currentOrderItems.map(line => {
+      const isMedia  = line.porcion === 'media';
+      const isUnidad = line.porcion === 'unidad';
+      const label = isUnidad ? '1 unidad' : (isMedia ? '½ ord.' : '1 ord.');
+      const price = isMedia ? (line.item.precio_media || 0) : (line.item.precio_completo || 0);
+      return `<div class="checkout-item-row">
+        <span>${esc(line.item.nombre)} <span class="checkout-item-qty">${line.qty || 1}× ${label}</span></span>
+        <span>$${(price * (line.qty || 1)).toFixed(2)}</span>
+      </div>`;
+    }).join('');
   }
 
-  const totalEl = overlay.querySelector('.checkout-total-amount');
-  if (totalEl) totalEl.textContent = fmtMXN(order.subtotal);
+  const subtotalAmountEl = document.getElementById('checkout-subtotal-amount');
+  if (subtotalAmountEl) subtotalAmountEl.textContent = `$${calcSubtotal().toFixed(2)}`;
 
-  // Reset payment state
-  showPaymentMethod('efectivo');
-  resetNumpad();
+  // Reset cash numpad
+  cashInput = '';
+  updateCashDisplay();
+
+  // Reset payment method to efectivo
+  document.querySelectorAll('.payment-toggle-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.method === 'efectivo');
+  });
+  document.querySelectorAll('.payment-section').forEach(s => {
+    s.classList.toggle('hidden', s.dataset.method !== 'efectivo');
+  });
+
+  // Reset confirm button
+  const confirmBtn = document.getElementById('btn-confirm-payment');
+  if (confirmBtn) confirmBtn.disabled = true;
+
+  // Update card total
+  updateCardTotal();
 
   showModal('modal-checkout');
 }
 
-function showPaymentMethod(method) {
-  const overlay = document.getElementById('modal-checkout');
-  overlay.querySelectorAll('.payment-toggle-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.method === method);
-  });
-  overlay.querySelectorAll('.payment-section').forEach(sec => {
-    sec.classList.toggle('hidden', sec.dataset.method !== method);
-  });
+function updateDiscountBreakdown() {
+  const subtotal = calcSubtotal();
+  const discountAmount = subtotal * (discountPct / 100);
+  const total = subtotal - discountAmount;
 
-  const confirmBtn = document.getElementById('btn-confirm-payment');
-  if (confirmBtn) {
-    confirmBtn.disabled = method === 'efectivo';
+  const breakdown = document.getElementById('checkout-totals-breakdown');
+  const labelEl   = document.getElementById('totals-discount-label');
+  const subEl     = document.getElementById('totals-subtotal-val');
+  const discEl    = document.getElementById('totals-discount-amount');
+  const totalEl   = document.getElementById('totals-total-val');
+
+  if (discountPct > 0) {
+    if (breakdown) breakdown.classList.remove('hidden');
+    if (labelEl)   labelEl.textContent = `Descuento (${discountPct}%)`;
+    if (subEl)     subEl.textContent   = `$${subtotal.toFixed(2)}`;
+    if (discEl)    discEl.textContent  = `-$${discountAmount.toFixed(2)}`;
+    if (totalEl)   totalEl.textContent = `$${total.toFixed(2)}`;
+  } else {
+    if (breakdown) breakdown.classList.add('hidden');
   }
-}
 
-let receivedCents = 0;
-
-function resetNumpad() {
-  receivedCents = 0;
   updateCashDisplay();
+  updateCardTotal();
 }
+
+function updateCardTotal() {
+  const el = document.getElementById('card-total-amount');
+  if (el) el.textContent = `$${getEffectiveTotal().toFixed(2)}`;
+}
+
+/* =====================================================
+   CASH NUMPAD
+   ===================================================== */
+let cashInput = '';
 
 function updateCashDisplay() {
-  const order      = checkoutData?.order;
-  const totalCents = Math.round((order?.subtotal || 0) * 100);
-  const received   = receivedCents;
+  const total = getEffectiveTotal();
+  const totalCents = Math.round(total * 100);
+  const inputCents = parseInt(cashInput || '0', 10);
 
-  const amountEl = document.getElementById('cash-amount-display');
-  if (amountEl) amountEl.textContent = fmtMXN(received / 100);
+  const displayEl = document.getElementById('cash-amount-display');
+  if (displayEl) displayEl.textContent = `$${(inputCents / 100).toFixed(2)}`;
 
   const cambioEl  = document.getElementById('cambio-display');
   const confirmBtn = document.getElementById('btn-confirm-payment');
 
-  if (received >= totalCents) {
-    const cambio = (received - totalCents) / 100;
+  if (inputCents >= totalCents) {
+    const cambio = (inputCents - totalCents) / 100;
     if (cambioEl) {
+      cambioEl.textContent = `Cambio: $${cambio.toFixed(2)}`;
       cambioEl.className   = 'cambio-display cambio-ok';
-      cambioEl.textContent = `Cambio: ${fmtMXN(cambio)}`;
     }
     if (confirmBtn) confirmBtn.disabled = false;
   } else {
-    const falta = (totalCents - received) / 100;
+    const faltan = (totalCents - inputCents) / 100;
     if (cambioEl) {
+      cambioEl.textContent = `Faltan: $${faltan.toFixed(2)}`;
       cambioEl.className   = 'cambio-display cambio-insuf';
-      cambioEl.textContent = `Faltan: ${fmtMXN(falta)}`;
     }
     if (confirmBtn) confirmBtn.disabled = true;
   }
 }
 
-function numpadPress(key) {
-  const totalCents = Math.round((checkoutData?.order?.subtotal || 0) * 100);
-
-  if (key === '⌫') {
-    receivedCents = Math.floor(receivedCents / 10);
-  } else if (key === '00') {
-    receivedCents = receivedCents * 100;
-  } else {
-    receivedCents = receivedCents * 10 + parseInt(key, 10);
-  }
-
-  // Cap at a reasonable maximum (99999.99)
-  if (receivedCents > 9999999) receivedCents = 9999999;
-
-  updateCashDisplay();
-}
-
-function quickAmount(amount) {
-  receivedCents = amount * 100;
-  updateCashDisplay();
-}
-
+/* =====================================================
+   CONFIRM PAYMENT (pay-first flow)
+   ===================================================== */
 async function confirmPayment() {
-  const order = checkoutData?.order;
+  const order = await getOrder(currentOrderId);
   if (!order) return;
 
-  const activeMethod = document.querySelector('.payment-toggle-btn.active')?.dataset.method || 'efectivo';
-  const totalCents   = Math.round((order.subtotal || 0) * 100);
-  const now          = new Date().toISOString();
-
-  let updateData = {
-    estado:          'cobrada',
-    metodo_pago:     activeMethod,
-    hora_completada: now
-  };
-
-  if (activeMethod === 'efectivo') {
-    updateData.efectivo_recibido = receivedCents / 100;
-    updateData.cambio            = (receivedCents - totalCents) / 100;
-  }
-
-  await updateOrder(currentOrderId, updateData);
-  await snapshotInProgress();
-  broadcast({ type: 'ORDER_PAID', orderId: currentOrderId });
-
-  // Show success screen
-  showSuccessScreen(updateData);
-}
-
-function showSuccessScreen(updateData) {
-  const overlay = document.getElementById('modal-checkout');
-  const body    = overlay.querySelector('.modal-body');
-
-  const cambioHtml = updateData.metodo_pago === 'efectivo' && updateData.cambio > 0
-    ? `<div class="success-cambio">Cambio: <strong>${fmtMXN(updateData.cambio)}</strong></div>`
-    : '';
-
-  body.innerHTML = `
-    <div class="success-screen">
-      <div class="success-icon">✅</div>
-      <div class="success-title">¡Pago completado!</div>
-      ${cambioHtml}
-      <div id="email-section" style="width:100%;max-width:360px;display:flex;flex-direction:column;gap:10px;align-items:center">
-        <button id="btn-show-email" class="btn-secondary" style="width:100%">Enviar ticket por email</button>
-        <div id="email-input-row" class="email-input-row hidden">
-          <input type="email" id="ticket-email-input" placeholder="correo@ejemplo.com">
-          <button id="btn-send-ticket" class="btn-primary" style="min-width:80px;padding:0 12px;font-size:14px;">Enviar</button>
-        </div>
-        <div id="email-status" class="email-status hidden"></div>
-      </div>
-      <button id="btn-nueva-orden" class="btn-primary" style="width:100%;max-width:360px">Nueva orden</button>
-    </div>`;
-
-  // Bind events
-  document.getElementById('btn-show-email').addEventListener('click', () => {
-    document.getElementById('email-input-row').classList.toggle('hidden');
-  });
-
-  document.getElementById('btn-send-ticket').addEventListener('click', async () => {
-    const email = document.getElementById('ticket-email-input').value.trim();
-    if (!isValidEmail(email)) {
-      setEmailStatus('Correo inválido', false);
+  // Validate discount reason
+  if (discountPct > 0) {
+    const reasonEl = document.getElementById('discount-reason');
+    const reason = (reasonEl ? reasonEl.value : '').trim();
+    if (!reason) {
+      const errEl = document.getElementById('discount-error');
+      if (errEl) { errEl.textContent = 'Escribe el motivo del descuento.'; errEl.classList.remove('hidden'); }
       return;
     }
-    const order    = await getOrder(currentOrderId);
-    const detalles = await getDetallesByOrder(currentOrderId);
-    const config   = getConfig();
+  }
 
-    setEmailStatus('Enviando…', null);
-    const result = await sendTicket(email, order, detalles, config);
-    if (result.success) {
-      await updateOrder(currentOrderId, { ticket_enviado: true, ticket_email: email });
-      setEmailStatus('Ticket enviado ✓', true);
-    } else {
-      setEmailStatus('Sin conexión — ticket no enviado', false);
-    }
+  // Validate phone
+  const phoneEl = document.getElementById('customer-phone');
+  const phoneRaw = phoneEl ? phoneEl.value.replace(/\D/g, '') : '';
+  if (phoneRaw && phoneRaw.length !== 10) {
+    const errEl = document.getElementById('customer-phone-error');
+    if (errEl) { errEl.textContent = 'El teléfono debe tener 10 dígitos.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+
+  // Collect payment info
+  const activeMethodBtn = document.querySelector('.payment-toggle-btn.active');
+  const method = activeMethodBtn ? activeMethodBtn.dataset.method : 'efectivo';
+
+  const effectiveTotal = getEffectiveTotal();
+  const subtotal = calcSubtotal();
+  const discountAmount = subtotal * (discountPct / 100);
+
+  let efectivoRecibido = null;
+  let cambio = null;
+  if (method === 'efectivo') {
+    efectivoRecibido = parseInt(cashInput || '0', 10) / 100;
+    cambio = efectivoRecibido - effectiveTotal;
+  }
+
+  // Collect customer info
+  const emailEl = document.getElementById('customer-email');
+  const clienteEmail  = (emailEl ? emailEl.value.trim() : '') || null;
+  const clientePhone  = phoneRaw || null;
+  const reasonEl2     = document.getElementById('discount-reason');
+  const discMotivo    = discountPct > 0 ? ((reasonEl2 ? reasonEl2.value.trim() : '') || null) : null;
+
+  const folio = generateFolio();
+  const now   = new Date().toISOString();
+
+  // Update order
+  await updateOrder({
+    id_orden:          currentOrderId,
+    estado:            'cobrada',
+    subtotal:          effectiveTotal,
+    metodo_pago:       method,
+    efectivo_recibido: efectivoRecibido,
+    cambio:            cambio,
+    hora_enviada_cocina: now,
+    hora_completada:   null,
+    folio:             folio,
+    cliente_email:     clienteEmail,
+    cliente_telefono:  clientePhone,
+    descuento_pct:     discountPct,
+    descuento_monto:   discountAmount,
+    descuento_motivo:  discMotivo
   });
 
-  document.getElementById('btn-nueva-orden').addEventListener('click', () => {
-    hideModal('modal-checkout');
-    navigate('./index.html');
-  });
+  // Save detalles
+  await deleteDetallesByOrder(currentOrderId);
+  for (const line of currentOrderItems) {
+    await saveDetalle({
+      id_orden:  currentOrderId,
+      articulo:  line.item.nombre,
+      porcion:   line.porcion,
+      cantidad:  line.qty || 1,
+      precio:    line.porcion === 'media' ? (line.item.precio_media || 0) : (line.item.precio_completo || 0),
+      notas:     line.notas || ''
+    });
+  }
 
-  // Update footer buttons
-  const footer = overlay.querySelector('.modal-footer');
-  if (footer) footer.innerHTML = '';
-}
+  // Clear snapshot
+  localStorage.removeItem('sj_hold_' + currentOrderId);
 
-function setEmailStatus(msg, ok) {
-  const el = document.getElementById('email-status');
-  if (!el) return;
-  el.textContent = msg;
-  el.className   = `email-status ${ok === true ? 'ok' : ok === false ? 'error' : ''}`;
-  el.classList.remove('hidden');
+  await snapshotInProgress();
+
+  // Broadcast to kitchen
+  broadcast({ type: 'ORDER_TO_KITCHEN', orderId: currentOrderId, nombreMesa: order.nombre_mesa });
+
+  // Send email ticket if provided
+  if (clienteEmail) {
+    try {
+      const detalles = currentOrderItems.map(line => ({
+        articulo: line.item.nombre,
+        porcion:  line.porcion,
+        cantidad: line.qty || 1,
+        precio:   line.porcion === 'media' ? (line.item.precio_media || 0) : (line.item.precio_completo || 0),
+        notas:    line.notas || ''
+      }));
+      await sendTicket(clienteEmail, {
+        folio,
+        nombreMesa:     order.nombre_mesa,
+        detalles,
+        subtotal,
+        discountPct,
+        discountAmount,
+        total:          effectiveTotal,
+        metodo_pago:    method,
+        efectivoRec:    efectivoRecibido,
+        cambio
+      });
+      localStorage.setItem('sj_ticket_just_sent', clienteEmail);
+    } catch {}
+  }
+
+  hideModal('modal-checkout');
+  navigate('./index.html');
 }
 
 /* =====================================================
-   KITCHEN VIEW
+   PHONE AUTO-FORMAT
+   ===================================================== */
+function formatPhone(value) {
+  const digits = value.replace(/\D/g, '').slice(0, 10);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0,3)}-${digits.slice(3)}`;
+  return `${digits.slice(0,3)}-${digits.slice(3,6)}-${digits.slice(6)}`;
+}
+
+/* =====================================================
+   VIEW: KITCHEN KDS
    ===================================================== */
 async function renderKitchen() {
   showView('view-kitchen');
-  updateNavActive('cocina');
   updateKitchenClock();
+  if (kitchenTimer) clearInterval(kitchenTimer);
+  kitchenTimer = setInterval(updateKitchenClock, 30000);
+
   await refreshKitchenCards();
 
-  // Update clock every minute
-  setInterval(updateKitchenClock, 60000);
-
-  // Update elapsed times every 30s
-  kitchenTimer = setInterval(refreshKitchenCardTimes, 30000);
-
-  listenSync(async (msg) => {
-    if (['ORDER_TO_KITCHEN', 'ORDER_CANCELLED', 'ORDER_PAID'].includes(msg.type)) {
-      await refreshKitchenCards();
+  listenSync(msg => {
+    if (msg.type === 'ORDER_TO_KITCHEN' || msg.type === 'ORDER_CANCELLED' || msg.type === 'ORDER_HOLD') {
+      refreshKitchenCards();
     }
   });
 }
 
 function updateKitchenClock() {
   const el = document.getElementById('kitchen-clock');
-  if (el) {
-    el.textContent = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
-  }
+  if (!el) return;
+  el.textContent = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
 }
 
 async function refreshKitchenCards() {
   const grid = document.getElementById('kitchen-grid');
   if (!grid) return;
 
-  const orders = await getOpenOrders();
-  const enCocina = orders
-    .filter(o => o.estado === 'en_cocina')
-    .sort((a, b) => new Date(a.hora_enviada_cocina) - new Date(b.hora_enviada_cocina));
+  const orders = await getKitchenOrders();
 
-  if (enCocina.length === 0) {
-    grid.innerHTML = `
-      <div class="empty-state" style="grid-column:span 2">
-        <div class="empty-state-icon">✅</div>
-        <div class="empty-state-text">Sin órdenes pendientes</div>
-      </div>`;
+  if (orders.length === 0) {
+    grid.innerHTML = '<div class="empty-state" style="text-align:center;padding:40px;color:#888">Sin órdenes pendientes</div>';
     return;
   }
 
-  const cards = await Promise.all(enCocina.map(async order => {
-    const detalles = await getDetallesByOrder(order.id_orden);
-    return { order, detalles };
-  }));
+  // Sort by hora_enviada_cocina ascending
+  orders.sort((a, b) => new Date(a.hora_enviada_cocina || 0) - new Date(b.hora_enviada_cocina || 0));
 
-  grid.innerHTML = cards.map(({ order, detalles }) => {
-    const elapsed = elapsedMin(order.hora_enviada_cocina);
-    const timeClass = elapsed < 10 ? 'time-green' : elapsed < 20 ? 'time-amber' : 'time-red';
-    const urgent    = elapsed >= 20;
+  const cards = await Promise.all(orders.map(async o => {
+    const detalles = await getDetallesByOrder(o.id_orden);
+    const since = o.hora_enviada_cocina ? Math.floor((Date.now() - new Date(o.hora_enviada_cocina)) / 60000) : null;
+    const urgent = since !== null && since >= 15;
 
-    const itemRows = detalles.map(d => `
-      <div class="kitchen-item-row">
-        <span class="kitchen-item-name">${escHtml(d.articulo)}</span>
-        <span class="kitchen-item-portion">${d.porcion === 'media' ? '½' : '1x'}</span>
-        <span class="kitchen-item-qty">${d.cantidad}</span>
-      </div>`).join('');
-
-    return `
-      <div class="kitchen-card ${urgent ? 'urgent' : ''}" data-order-id="${order.id_orden}">
-        <div class="kitchen-card-header">
-          <span class="kitchen-table-name">${escHtml(order.nombre_mesa)}</span>
-          <span class="kitchen-folio">${order.folio || ''}</span>
-          <span class="kitchen-time-badge ${timeClass}" data-sent="${order.hora_enviada_cocina}">${elapsed} min</span>
-        </div>
-        <div class="kitchen-items">${itemRows || '<div style="color:var(--text-secondary);font-size:13px;padding:8px 0">Sin artículos</div>'}</div>
-        <div class="kitchen-card-footer">
-          <button class="btn-order-ready" data-order-id="${order.id_orden}">Orden lista ✓</button>
+    const itemsHtml = detalles.map(d => {
+      const isUnidad = d.porcion === 'unidad';
+      const isMedia  = d.porcion === 'media';
+      const portionLabel = isUnidad ? '1 unidad' : (isMedia ? '½' : '1×');
+      const notasHtml = d.notas ? `<div class="kitchen-item-notes">${esc(d.notas)}</div>` : '';
+      return `<div class="kitchen-item-main">
+        <span class="kitchen-item-portion">${portionLabel}</span>
+        <div>
+          <span class="kitchen-item-name">${esc(d.articulo)}</span>
+          ${d.cantidad > 1 ? `<span class="kitchen-item-qty">×${d.cantidad}</span>` : ''}
+          ${notasHtml}
         </div>
       </div>`;
-  }).join('');
-}
+    }).join('');
 
-function refreshKitchenCardTimes() {
-  document.querySelectorAll('.kitchen-time-badge[data-sent]').forEach(badge => {
-    const elapsed   = elapsedMin(badge.dataset.sent);
-    badge.textContent = `${elapsed} min`;
-    badge.className   = `kitchen-time-badge ${elapsed < 10 ? 'time-green' : elapsed < 20 ? 'time-amber' : 'time-red'}`;
-    const card = badge.closest('.kitchen-card');
-    if (card) card.classList.toggle('urgent', elapsed >= 20);
-  });
+    return `
+      <div class="kitchen-card ${urgent ? 'kitchen-card-urgent' : ''}" data-order-id="${o.id_orden}">
+        <div class="kitchen-card-header">
+          <span class="kitchen-card-name">${esc(o.nombre_mesa)}</span>
+          ${since !== null ? `<span class="kitchen-elapsed ${urgent ? 'elapsed-urgent' : ''}">${since}m</span>` : ''}
+        </div>
+        <div class="kitchen-card-items">${itemsHtml}</div>
+        <button class="kitchen-ready-btn" data-order-id="${o.id_orden}">Orden lista ✓</button>
+      </div>`;
+  }));
+
+  grid.innerHTML = cards.join('');
 }
 
 async function markOrderReady(orderId) {
-  const order = await getOrder(orderId);
-  if (!order) return;
-
-  const now   = new Date().toISOString();
-  const prep  = order.hora_enviada_cocina
-    ? (Date.now() - new Date(order.hora_enviada_cocina).getTime()) / 60000
-    : null;
-
-  await updateOrder(orderId, {
-    estado:                 'lista',
-    hora_completada:        now,
-    tiempo_preparacion_min: prep
-  });
-
-  await snapshotInProgress();
-  broadcast({ type: 'ORDER_READY', orderId, nombreMesa: order.nombre_mesa });
-
-  // Animate card out
-  const card = document.querySelector(`.kitchen-card[data-order-id="${orderId}"]`);
-  if (card) {
-    card.classList.add('exiting');
-    setTimeout(() => card.remove(), 300);
-  }
+  const now = new Date().toISOString();
+  await updateOrder({ id_orden: orderId, hora_completada: now });
+  broadcast({ type: 'ORDER_READY', orderId });
+  await refreshKitchenCards();
 }
 
 /* =====================================================
-   ADMIN VIEW
+   VIEW: ADMIN
    ===================================================== */
 async function renderAdmin() {
   showView('view-admin');
-  updateNavActive('admin');
 
-  if (!adminUnlocked) {
+  const pin = localStorage.getItem('sj_admin_pin');
+  if (!adminUnlocked && pin) {
     showAdminPinGate();
+  } else if (!pin) {
+    showAdminPinSetup();
   } else {
-    showAdminContent();
+    renderAdminContent();
   }
 }
 
 function showAdminPinGate() {
-  const container = document.getElementById('admin-content-wrapper');
-  if (!container) return;
-
-  const storedPin = localStorage.getItem('sj_admin_pin');
-  const isFirstTime = !storedPin;
-
-  container.innerHTML = `
+  const wrapper = document.getElementById('admin-content-wrapper');
+  if (!wrapper) return;
+  wrapper.innerHTML = `
     <div class="pin-gate">
-      <div class="pin-title">${isFirstTime ? 'Configura tu PIN de administrador' : 'Acceso Admin'}</div>
-      ${isFirstTime ? `
-        <div style="font-size:14px;color:var(--text-secondary);text-align:center;">Cambia el PIN por defecto (1234) para proteger el panel.</div>
-        <div class="form-field" style="width:100%;max-width:280px">
-          <label class="form-label">PIN anterior</label>
-          <input type="password" id="pin-old" inputmode="numeric" maxlength="6" value="1234" placeholder="1234">
-        </div>
-        <div class="form-field" style="width:100%;max-width:280px">
-          <label class="form-label">PIN nuevo (4-6 dígitos)</label>
-          <input type="password" id="pin-new1" inputmode="numeric" maxlength="6" placeholder="">
-        </div>
-        <div class="form-field" style="width:100%;max-width:280px">
-          <label class="form-label">Confirmar PIN nuevo</label>
-          <input type="password" id="pin-new2" inputmode="numeric" maxlength="6" placeholder="">
-        </div>
-        <div id="pin-error" class="pin-error hidden"></div>
-        <button id="btn-setup-pin" class="btn-primary" style="width:100%;max-width:280px">Guardar PIN</button>
-      ` : `
-        <div class="pin-dots" id="pin-dots">
-          <div class="pin-dot"></div>
-          <div class="pin-dot"></div>
-          <div class="pin-dot"></div>
-          <div class="pin-dot"></div>
-        </div>
-        <div class="pin-keypad" id="pin-keypad">
-          ${[1,2,3,4,5,6,7,8,9].map(n => `<button class="pin-key" data-key="${n}">${n}</button>`).join('')}
-          <button class="pin-key pin-empty"></button>
-          <button class="pin-key" data-key="0">0</button>
-          <button class="pin-key pin-backspace" data-key="⌫">⌫</button>
-        </div>
-        <div id="pin-error" class="pin-error hidden"></div>
-        <div id="pin-lockout" class="pin-lockout hidden"></div>
-      `}
+      <div class="pin-gate-title">Admin</div>
+      <div class="pin-gate-subtitle">Ingresa tu PIN de 4 dígitos</div>
+      <div class="pin-dots">
+        <span class="pin-dot" id="pd0"></span>
+        <span class="pin-dot" id="pd1"></span>
+        <span class="pin-dot" id="pd2"></span>
+        <span class="pin-dot" id="pd3"></span>
+      </div>
+      <div class="pin-keypad">
+        ${[1,2,3,4,5,6,7,8,9,'','0','⌫'].map(k => `
+          <button class="pin-key ${k === '' ? 'pin-key-empty' : ''}" data-key="${k}">${k}</button>
+        `).join('')}
+      </div>
+      <div id="pin-error" class="pin-error hidden">PIN incorrecto</div>
     </div>`;
 
-  if (isFirstTime) {
-    document.getElementById('btn-setup-pin').addEventListener('click', handlePinSetup);
-  } else {
-    initPinKeypad();
+  initPinKeypad(verifyPin);
+}
+
+function showAdminPinSetup() {
+  const wrapper = document.getElementById('admin-content-wrapper');
+  if (!wrapper) return;
+  wrapper.innerHTML = `
+    <div class="pin-gate">
+      <div class="pin-gate-title">Configurar PIN</div>
+      <div class="pin-gate-subtitle">Crea un PIN de 4 dígitos para proteger Admin</div>
+      <div class="form-field" style="max-width:240px;margin:0 auto 12px">
+        <label class="form-label">PIN nuevo (4 dígitos)</label>
+        <input type="password" id="setup-pin1" inputmode="numeric" maxlength="4" placeholder="">
+      </div>
+      <div class="form-field" style="max-width:240px;margin:0 auto 12px">
+        <label class="form-label">Confirmar PIN</label>
+        <input type="password" id="setup-pin2" inputmode="numeric" maxlength="4" placeholder="">
+      </div>
+      <div id="setup-pin-error" class="pin-error hidden" style="text-align:center;margin-bottom:8px"></div>
+      <button id="btn-setup-pin" class="btn-primary">Crear PIN</button>
+    </div>`;
+
+  document.getElementById('btn-setup-pin').onclick = handlePinSetup;
+}
+
+function initPinKeypad(onComplete) {
+  let pinBuffer = '';
+  const dots = [0,1,2,3].map(i => document.getElementById('pd' + i));
+
+  function updateDots() {
+    dots.forEach((d, i) => {
+      if (d) d.classList.toggle('filled', i < pinBuffer.length);
+    });
   }
-}
 
-let pinAttempts   = 0;
-let pinLockoutEnd = 0;
-let pinBuffer     = '';
-
-function initPinKeypad() {
-  pinBuffer   = '';
-  pinAttempts = pinAttempts || 0;
-
-  const keypad = document.getElementById('pin-keypad');
-  if (!keypad) return;
-
-  keypad.addEventListener('click', (e) => {
-    const key = e.target.closest('[data-key]')?.dataset.key;
-    if (!key) return;
-
-    if (Date.now() < pinLockoutEnd) return;
-
-    if (key === '⌫') {
-      pinBuffer = pinBuffer.slice(0, -1);
-    } else if (pinBuffer.length < 6) {
-      pinBuffer += key;
-    }
-
-    updatePinDots(pinBuffer.length);
-
-    if (pinBuffer.length >= 4) {
-      setTimeout(() => verifyPin(pinBuffer), 100);
-    }
-  });
-}
-
-function updatePinDots(count) {
-  document.querySelectorAll('.pin-dot').forEach((dot, i) => {
-    dot.classList.toggle('filled', i < count);
-  });
-}
-
-async function verifyPin(entered) {
-  const stored = localStorage.getItem('sj_admin_pin');
-  const hash   = await hashPin(entered);
-
-  if (hash === stored) {
-    pinAttempts = 0;
-    pinBuffer   = '';
-    adminUnlocked = true;
-    showAdminContent();
-  } else {
-    pinAttempts++;
-    pinBuffer = '';
-    updatePinDots(0);
-
-    if (pinAttempts >= 3) {
-      pinLockoutEnd = Date.now() + 30000;
-      startLockoutCountdown();
-    } else {
-      const errEl = document.getElementById('pin-error');
-      if (errEl) {
-        errEl.textContent = `PIN incorrecto. ${3 - pinAttempts} intento${3 - pinAttempts !== 1 ? 's' : ''} restante${3 - pinAttempts !== 1 ? 's' : ''}.`;
-        errEl.classList.remove('hidden');
+  document.querySelectorAll('.pin-key').forEach(btn => {
+    btn.onclick = () => {
+      const key = btn.dataset.key;
+      if (key === '⌫') {
+        pinBuffer = pinBuffer.slice(0, -1);
+      } else if (key !== '' && pinBuffer.length < 4) {
+        pinBuffer += key;
       }
-    }
-  }
+      updateDots();
+      if (pinBuffer.length === 4) {
+        onComplete(pinBuffer);
+        pinBuffer = '';
+        setTimeout(updateDots, 300);
+      }
+    };
+  });
 }
 
-function startLockoutCountdown() {
-  const lockEl = document.getElementById('pin-lockout');
-  if (!lockEl) return;
-
-  const errEl = document.getElementById('pin-error');
-  if (errEl) errEl.classList.add('hidden');
-
-  lockEl.classList.remove('hidden');
-
-  const tick = () => {
-    const remaining = Math.ceil((pinLockoutEnd - Date.now()) / 1000);
-    if (remaining <= 0) {
-      lockEl.classList.add('hidden');
-      pinAttempts = 0;
-      return;
+function verifyPin(pin) {
+  const stored = localStorage.getItem('sj_admin_pin');
+  if (pin === stored) {
+    adminUnlocked = true;
+    renderAdminContent();
+  } else {
+    const errEl = document.getElementById('pin-error');
+    if (errEl) {
+      errEl.classList.remove('hidden');
+      setTimeout(() => errEl.classList.add('hidden'), 2000);
     }
-    lockEl.textContent = `Demasiados intentos. Espera ${remaining}s`;
-    setTimeout(tick, 1000);
-  };
-  tick();
+  }
 }
 
 async function handlePinSetup() {
-  const oldPin  = document.getElementById('pin-old').value.trim();
-  const newPin1 = document.getElementById('pin-new1').value.trim();
-  const newPin2 = document.getElementById('pin-new2').value.trim();
-  const errEl   = document.getElementById('pin-error');
+  const p1 = document.getElementById('setup-pin1')?.value;
+  const p2 = document.getElementById('setup-pin2')?.value;
+  const errEl = document.getElementById('setup-pin-error');
 
-  const showErr = (msg) => {
-    if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); }
-  };
-
-  // Validate old PIN (default 1234)
-  const storedHash = localStorage.getItem('sj_admin_pin');
-  const defaultHash = await hashPin('1234');
-  if (storedHash && storedHash !== defaultHash) {
-    const oldHash = await hashPin(oldPin);
-    if (oldHash !== storedHash) { showErr('PIN anterior incorrecto.'); return; }
+  if (!p1 || p1.length !== 4 || !/^\d{4}$/.test(p1)) {
+    if (errEl) { errEl.textContent = 'El PIN debe ser exactamente 4 dígitos.'; errEl.classList.remove('hidden'); }
+    return;
   }
-
-  if (newPin1.length < 4) { showErr('El PIN nuevo debe tener al menos 4 dígitos.'); return; }
-  if (!/^\d+$/.test(newPin1)) { showErr('El PIN solo puede contener dígitos.'); return; }
-  if (newPin1 !== newPin2)  { showErr('Los PINs nuevos no coinciden.'); return; }
-
-  const hash = await hashPin(newPin1);
-  localStorage.setItem('sj_admin_pin', hash);
+  if (p1 !== p2) {
+    if (errEl) { errEl.textContent = 'Los PINes no coinciden.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  localStorage.setItem('sj_admin_pin', p1);
+  localStorage.setItem('sj_pin_length', '4');
   adminUnlocked = true;
-  showAdminContent();
+  renderAdminContent();
 }
 
-async function hashPin(pin) {
-  const data = new TextEncoder().encode(pin);
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+async function doChangePin() {
+  const current = document.getElementById('change-pin-current')?.value;
+  const new1    = document.getElementById('change-pin-new1')?.value;
+  const new2    = document.getElementById('change-pin-new2')?.value;
+  const errEl   = document.getElementById('change-pin-error');
+
+  const stored = localStorage.getItem('sj_admin_pin');
+  if (current !== stored) {
+    if (errEl) { errEl.textContent = 'PIN actual incorrecto.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  if (!new1 || new1.length !== 4 || !/^\d{4}$/.test(new1)) {
+    if (errEl) { errEl.textContent = 'El PIN nuevo debe ser exactamente 4 dígitos.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  if (new1 !== new2) {
+    if (errEl) { errEl.textContent = 'Los PINes nuevos no coinciden.'; errEl.classList.remove('hidden'); }
+    return;
+  }
+  localStorage.setItem('sj_admin_pin', new1);
+  localStorage.setItem('sj_pin_length', '4');
+  hideModal('modal-change-pin');
+  showToast('PIN actualizado correctamente.');
 }
 
-async function showAdminContent() {
-  const container = document.getElementById('admin-content-wrapper');
-  if (!container) return;
+/* =====================================================
+   ADMIN CONTENT
+   ===================================================== */
+async function renderAdminContent() {
+  const wrapper = document.getElementById('admin-content-wrapper');
+  if (!wrapper) return;
 
-  container.innerHTML = `
+  wrapper.innerHTML = `
     <div class="admin-tabs">
       <button class="admin-tab active" data-tab="menu">Menú</button>
-      <button class="admin-tab" data-tab="config">Configuración</button>
       <button class="admin-tab" data-tab="reportes">Reportes</button>
+      <button class="admin-tab" data-tab="config">Configuración</button>
     </div>
-    <div id="tab-menu"     class="admin-tab-content active"></div>
-    <div id="tab-config"   class="admin-tab-content"></div>
-    <div id="tab-reportes" class="admin-tab-content"></div>`;
+    <div id="admin-tab-content" class="admin-tab-content"></div>`;
 
-  container.querySelectorAll('.admin-tab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      container.querySelectorAll('.admin-tab').forEach(b => b.classList.remove('active'));
-      container.querySelectorAll('.admin-tab-content').forEach(c => c.classList.remove('active'));
-      btn.classList.add('active');
-      const tabId = `tab-${btn.dataset.tab}`;
-      document.getElementById(tabId)?.classList.add('active');
-      if (btn.dataset.tab === 'menu')     renderMenuTab();
-      if (btn.dataset.tab === 'config')   renderConfigTab();
-      if (btn.dataset.tab === 'reportes') renderReportesTab();
-    });
-  });
-
-  renderMenuTab();
-}
-
-/* ---- MENU TAB ---- */
-async function renderMenuTab() {
-  const tab = document.getElementById('tab-menu');
-  if (!tab) return;
-
-  const items = await getMenuItems();
-
-  // Group by category
-  const byCategory = {};
-  items.forEach(item => {
-    if (!byCategory[item.categoria]) byCategory[item.categoria] = [];
-    byCategory[item.categoria].push(item);
-  });
-
-  let html = '';
-  for (const [cat, catItems] of Object.entries(byCategory)) {
-    html += `
-      <div class="menu-section" data-category="${escAttr(cat)}">
-        <div class="menu-section-header">
-          <span class="menu-section-title">${escHtml(cat)}</span>
-          <span class="menu-section-count">${catItems.length} artículo${catItems.length !== 1 ? 's' : ''}</span>
-          <label class="toggle-switch" title="Desactivar categoría">
-            <input type="checkbox" class="cat-toggle" data-category="${escAttr(cat)}" ${catItems.every(i => i.activo) ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        ${catItems.map((item, idx) => `
-          <div class="menu-item-admin-row" data-item-id="${item.id_articulo}">
-            <div class="btn-reorder-group" style="display:flex;flex-direction:column;gap:2px">
-              <button class="btn-reorder btn-move-up" data-id="${item.id_articulo}" data-cat="${escAttr(cat)}" ${idx === 0 ? 'disabled style="opacity:0.3"' : ''}>▲</button>
-              <button class="btn-reorder btn-move-down" data-id="${item.id_articulo}" data-cat="${escAttr(cat)}" ${idx === catItems.length - 1 ? 'disabled style="opacity:0.3"' : ''}>▼</button>
-            </div>
-            <div class="menu-admin-info">
-              <div class="menu-admin-name">${escHtml(item.nombre)}</div>
-              <div class="menu-admin-prices">
-                Completa: ${item.precio_completo > 0 ? fmtMXN(item.precio_completo) : '<span style="color:var(--danger-text)">Sin precio</span>'}
-                ${item.tiene_media ? ` · ½: ${item.precio_media > 0 ? fmtMXN(item.precio_media) : '<span style="color:var(--danger-text)">Sin precio</span>'}` : ''}
-              </div>
-            </div>
-            <label class="toggle-switch">
-              <input type="checkbox" class="item-active-toggle" data-id="${item.id_articulo}" ${item.activo ? 'checked' : ''}>
-              <span class="toggle-slider"></span>
-            </label>
-            <button class="btn-icon btn-edit" data-id="${item.id_articulo}">Editar</button>
-            <button class="btn-icon btn-delete" data-id="${item.id_articulo}">Eliminar</button>
-          </div>
-          <div id="edit-form-${item.id_articulo}" class="edit-form hidden"></div>
-        `).join('')}
-      </div>`;
-  }
-
-  html += `<button class="btn-add-category" id="btn-add-category">+ Agregar categoría</button>`;
-  tab.innerHTML = html;
-
-  // Bind events
-  tab.addEventListener('change', handleMenuTabChange);
-  tab.addEventListener('click',  handleMenuTabClick);
-}
-
-async function handleMenuTabChange(e) {
-  const target = e.target;
-
-  if (target.classList.contains('item-active-toggle')) {
-    const id = parseInt(target.dataset.id, 10);
-    await updateMenuItem(id, { activo: target.checked });
-    broadcast({ type: 'MENU_UPDATED' });
-    await checkPriceWarning();
-  }
-
-  if (target.classList.contains('cat-toggle')) {
-    const cat   = target.dataset.category;
-    const items = await getMenuItems({ categoria: cat });
-    for (const item of items) {
-      await updateMenuItem(item.id_articulo, { activo: target.checked });
-    }
-    broadcast({ type: 'MENU_UPDATED' });
-  }
-}
-
-async function handleMenuTabClick(e) {
-  const btn = e.target.closest('button');
-  if (!btn) return;
-
-  if (btn.classList.contains('btn-edit')) {
-    const id = parseInt(btn.dataset.id, 10);
-    toggleEditForm(id);
-    return;
-  }
-
-  if (btn.classList.contains('btn-delete')) {
-    const id   = parseInt(btn.dataset.id, 10);
-    const item = await getMenuItemById(id);
-    showConfirm(`¿Eliminar "${item?.nombre}"? Esta acción no se puede deshacer.`, async () => {
-      await deleteMenuItem(id);
-      broadcast({ type: 'MENU_UPDATED' });
-      await renderMenuTab();
-    });
-    return;
-  }
-
-  if (btn.classList.contains('btn-move-up') || btn.classList.contains('btn-move-down')) {
-    const id  = parseInt(btn.dataset.id, 10);
-    const cat = btn.dataset.cat;
-    await reorderItem(id, cat, btn.classList.contains('btn-move-up') ? -1 : 1);
-    await renderMenuTab();
-    return;
-  }
-
-  if (btn.id === 'btn-add-category') {
-    const name = prompt('Nombre de la nueva categoría:');
-    if (name?.trim()) {
-      await saveMenuItem({
-        categoria:       name.trim(),
-        nombre:          'Nuevo artículo',
-        precio_completo: 0,
-        tiene_media:     false,
-        activo:          true,
-        orden_display:   1
-      });
-      broadcast({ type: 'MENU_UPDATED' });
-      await renderMenuTab();
-    }
-    return;
-  }
-}
-
-async function toggleEditForm(id) {
-  const formEl = document.getElementById(`edit-form-${id}`);
-  if (!formEl) return;
-
-  if (!formEl.classList.contains('hidden')) {
-    formEl.classList.add('hidden');
-    return;
-  }
-
-  const item       = await getMenuItemById(id);
-  const allItems   = await getMenuItems();
-  const categories = [...new Set(allItems.map(i => i.categoria))];
-
-  formEl.innerHTML = `
-    <div class="form-row">
-      <div class="form-field">
-        <label class="form-label">Nombre</label>
-        <input type="text" id="ef-nombre-${id}" value="${escAttr(item.nombre)}">
-      </div>
-      <div class="form-field">
-        <label class="form-label">Categoría</label>
-        <select id="ef-cat-${id}">
-          ${categories.map(c => `<option value="${escAttr(c)}" ${c === item.categoria ? 'selected' : ''}>${escHtml(c)}</option>`).join('')}
-        </select>
-      </div>
-    </div>
-    <div class="form-row">
-      <div class="form-field">
-        <label class="form-label">Precio orden completa (MXN)</label>
-        <input type="number" id="ef-precio-${id}" value="${item.precio_completo}" min="0" step="0.5">
-      </div>
-      <div class="form-field">
-        <div class="toggle-row">
-          <span class="toggle-label">¿Tiene media orden?</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="ef-tiene-media-${id}" ${item.tiene_media ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-    </div>
-    <div class="form-row" id="ef-media-row-${id}" ${item.tiene_media ? '' : 'style="display:none"'}>
-      <div class="form-field">
-        <label class="form-label">Precio media orden (MXN)</label>
-        <input type="number" id="ef-precio-media-${id}" value="${item.precio_media || ''}" min="0" step="0.5">
-      </div>
-      <div class="form-field">
-        <div class="toggle-row">
-          <span class="toggle-label">Activo</span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="ef-activo-${id}" ${item.activo ? 'checked' : ''}>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-    </div>
-    <div class="form-actions">
-      <button class="btn-cancel-form" id="ef-cancel-${id}">Cancelar</button>
-      <button class="btn-save" id="ef-save-${id}">Guardar</button>
-    </div>`;
-
-  formEl.classList.remove('hidden');
-
-  // Toggle media price visibility
-  const tieneMediaChk = document.getElementById(`ef-tiene-media-${id}`);
-  tieneMediaChk.addEventListener('change', () => {
-    document.getElementById(`ef-media-row-${id}`).style.display = tieneMediaChk.checked ? '' : 'none';
-  });
-
-  document.getElementById(`ef-cancel-${id}`).addEventListener('click', () => {
-    formEl.classList.add('hidden');
-  });
-
-  document.getElementById(`ef-save-${id}`).addEventListener('click', async () => {
-    const nombre      = document.getElementById(`ef-nombre-${id}`).value.trim();
-    const categoria   = document.getElementById(`ef-cat-${id}`).value;
-    const precio      = parseFloat(document.getElementById(`ef-precio-${id}`).value) || 0;
-    const tieneMedia  = document.getElementById(`ef-tiene-media-${id}`).checked;
-    const precioMedia = tieneMedia ? (parseFloat(document.getElementById(`ef-precio-media-${id}`).value) || 0) : null;
-    const activo      = document.getElementById(`ef-activo-${id}`).checked;
-
-    await updateMenuItem(id, { nombre, categoria, precio_completo: precio, tiene_media: tieneMedia, precio_media: precioMedia, activo });
-    broadcast({ type: 'MENU_UPDATED' });
-    await checkPriceWarning();
-    await renderMenuTab();
-  });
-}
-
-async function reorderItem(itemId, cat, direction) {
-  const items = await getMenuItems({ categoria: cat });
-  const idx   = items.findIndex(i => i.id_articulo === itemId);
-  const swapIdx = idx + direction;
-  if (swapIdx < 0 || swapIdx >= items.length) return;
-
-  const a = items[idx];
-  const b = items[swapIdx];
-  await updateMenuItem(a.id_articulo, { orden_display: b.orden_display });
-  await updateMenuItem(b.id_articulo, { orden_display: a.orden_display });
-}
-
-/* ---- CONFIG TAB ---- */
-async function renderConfigTab() {
-  const tab = document.getElementById('tab-config');
-  if (!tab) return;
-
-  const config   = getConfig();
-  const connected = await isConnected();
-
-  tab.innerHTML = `
-    <div class="config-section">
-      <div class="config-section-title">Información del negocio</div>
-      <div class="form-field">
-        <label class="form-label">Nombre del negocio</label>
-        <input type="text" id="cfg-nombre" value="${escAttr(config.nombre || 'Sabor Jarocho')}">
-      </div>
-      <div class="form-field">
-        <label class="form-label">Dirección</label>
-        <input type="text" id="cfg-direccion" value="${escAttr(config.direccion || 'Av. P. de la Victoria 2118, Partido Senecú, 32459')}">
-      </div>
-      <div class="form-field">
-        <label class="form-label">Mensaje de cierre en ticket</label>
-        <input type="text" id="cfg-cierre" value="${escAttr(config.cierre || 'Gracias por su visita. ¡Vuelva pronto!')}">
-      </div>
-      <div class="form-field">
-        <label class="form-label">Hora de respaldo automático</label>
-        <input type="time" id="cfg-backup-time" value="${escAttr(config.backupTime || '02:00')}">
-      </div>
-      <button id="btn-save-config" class="btn-primary">Guardar configuración</button>
-    </div>
-
-    <div class="config-section">
-      <div class="config-section-title">Cuenta Google</div>
-      <div class="google-status">
-        <span class="status-dot ${connected ? 'connected' : 'disconnected'}"></span>
-        <span id="google-status-text">${connected ? 'Conectado' : 'No conectado'}</span>
-      </div>
-      <p class="config-note">Se usa para enviar tickets por Gmail y respaldar ventas en Google Drive.</p>
-      <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button id="btn-connect-google" class="btn-secondary" ${connected ? 'style="display:none"' : ''}>Conectar cuenta Google</button>
-        <button id="btn-disconnect-google" class="btn-danger" ${connected ? '' : 'style="display:none"'}>Desconectar</button>
-      </div>
-    </div>
-
-    <div class="config-section">
-      <div class="config-section-title">PIN de administrador</div>
-      <button id="btn-change-pin" class="btn-secondary">Cambiar PIN</button>
-    </div>
-
-    <div class="config-section">
-      <div class="config-section-title">Respaldo en Google Drive</div>
-      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px">
-        Último respaldo: <strong>${localStorage.getItem('sj_last_backup') || 'Nunca'}</strong>
-      </div>
-      <button id="btn-backup-now" class="btn-secondary">Respaldar ahora</button>
-      <div id="backup-status" class="hidden" style="margin-top:8px;font-size:14px"></div>
-    </div>`;
-
-  document.getElementById('btn-save-config').addEventListener('click', () => {
-    const cfg = {
-      nombre:     document.getElementById('cfg-nombre').value.trim(),
-      direccion:  document.getElementById('cfg-direccion').value.trim(),
-      cierre:     document.getElementById('cfg-cierre').value.trim(),
-      backupTime: document.getElementById('cfg-backup-time').value
+  const tabs = wrapper.querySelectorAll('.admin-tab');
+  tabs.forEach(tab => {
+    tab.onclick = () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      renderAdminTab(tab.dataset.tab);
     };
-    localStorage.setItem('sj_config', JSON.stringify(cfg));
-    showToast('Configuración guardada');
   });
 
-  document.getElementById('btn-connect-google').addEventListener('click', async () => {
-    try {
-      await connectGoogle();
-      document.getElementById('google-status-text').textContent = 'Conectado';
-      document.querySelector('.status-dot').className = 'status-dot connected';
-      document.getElementById('btn-connect-google').style.display    = 'none';
-      document.getElementById('btn-disconnect-google').style.display = '';
-    } catch (e) {
-      alert('Error al conectar Google: ' + e.message);
-    }
-  });
-
-  document.getElementById('btn-disconnect-google').addEventListener('click', () => {
-    disconnectGoogle();
-    document.getElementById('google-status-text').textContent = 'No conectado';
-    document.querySelector('.status-dot').className = 'status-dot disconnected';
-    document.getElementById('btn-connect-google').style.display    = '';
-    document.getElementById('btn-disconnect-google').style.display = 'none';
-  });
-
-  document.getElementById('btn-change-pin').addEventListener('click', () => {
-    showChangePinModal();
-  });
-
-  document.getElementById('btn-backup-now').addEventListener('click', async () => {
-    const statusEl = document.getElementById('backup-status');
-    statusEl.textContent = 'Creando respaldo…';
-    statusEl.className   = '';
-    statusEl.classList.remove('hidden');
-
-    try {
-      const today  = todayStr();
-      const orders = await getOrdersByDate(today);
-      const detallesMap = {};
-      for (const o of orders) {
-        detallesMap[o.id_orden] = await getDetallesByOrder(o.id_orden);
-      }
-      const csv    = buildBackupCSV(orders, detallesMap);
-      const result = await backupToDrive(csv);
-
-      if (result.success) {
-        const now = new Date().toLocaleString('es-MX');
-        localStorage.setItem('sj_last_backup', now);
-        statusEl.textContent = '✓ Respaldo completado';
-        statusEl.style.color = 'var(--success-text)';
-      } else {
-        statusEl.textContent = 'Error: ' + result.error;
-        statusEl.style.color = 'var(--danger-text)';
-      }
-    } catch (e) {
-      statusEl.textContent = 'Error: ' + e.message;
-      statusEl.style.color  = 'var(--danger-text)';
-    }
-  });
+  renderAdminTab('menu');
 }
 
-function showChangePinModal() {
-  const modal = document.getElementById('modal-change-pin');
-  if (!modal) return;
-  modal.querySelector('input').value = '';
-  document.getElementById('change-pin-new1').value = '';
-  document.getElementById('change-pin-new2').value = '';
-  document.getElementById('change-pin-error').classList.add('hidden');
-  showModal('modal-change-pin');
+async function renderAdminTab(tab) {
+  const content = document.getElementById('admin-tab-content');
+  if (!content) return;
+
+  if (tab === 'menu') {
+    await renderMenuAdmin(content);
+  } else if (tab === 'reportes') {
+    await renderReportesAdmin(content);
+  } else if (tab === 'config') {
+    renderConfigAdmin(content);
+  }
 }
 
-/* ---- REPORTES TAB ---- */
-async function renderReportesTab() {
-  const tab = document.getElementById('tab-reportes');
-  if (!tab) return;
-
-  const stats    = await getTodayStats();
-  const topItems = await getTopItems();
-  const hourly   = await getHourlyRevenue();
-
-  tab.innerHTML = `
-    <div class="stats-cards">
-      <div class="stat-card">
-        <div class="stat-label">Total ventas hoy</div>
-        <div class="stat-value">${fmtMXN(stats.totalVentas)}</div>
+/* ---------- Menu Admin ---------- */
+async function renderMenuAdmin(container) {
+  const items = await getMenuItems({});
+  container.innerHTML = `
+    <div class="admin-section">
+      <div class="admin-section-header">
+        <span class="admin-section-title">Artículos del menú</span>
+        <button class="btn-primary btn-sm" id="btn-add-menu-item">+ Agregar</button>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">Órdenes completadas</div>
-        <div class="stat-value">${stats.ordenesCompletadas}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Ticket promedio</div>
-        <div class="stat-value">${fmtMXN(stats.ticketPromedio)}</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Tiempo prep. prom.</div>
-        <div class="stat-value">${stats.tiempoPrepPromedio} min</div>
-      </div>
-    </div>
-
-    <div class="reports-section">
-      <div class="reports-section-title">Top 5 artículos (hoy)</div>
-      ${topItems.length === 0
-        ? '<div style="color:var(--text-secondary);font-size:14px">Sin ventas hoy</div>'
-        : topItems.map(item => `
-          <div class="top-item-row">
-            <span class="top-item-rank">${item.rank}</span>
-            <span class="top-item-name">${escHtml(item.nombre)}</span>
-            <span class="top-item-qty">${item.cantidad}</span>
-          </div>`).join('')
-      }
-    </div>
-
-    <div class="reports-section">
-      <div class="reports-section-title">Ventas por hora (hoy)</div>
-      <div class="chart-container">
-        <canvas id="hourly-chart"></canvas>
+      <div class="menu-admin-list">
+        ${items.length === 0 ? '<div class="empty-state">No hay artículos.</div>' : items.map(item => `
+          <div class="menu-admin-row">
+            <div class="menu-admin-info">
+              <span class="menu-admin-name ${!item.activo ? 'item-inactive' : ''}">${esc(item.nombre)}</span>
+              <span class="menu-admin-cat">${esc(item.categoria)}</span>
+            </div>
+            <div class="menu-admin-prices">
+              <span>$${(item.precio_completo||0).toFixed(2)}</span>
+              ${item.tiene_media ? `<span class="price-media">½ $${(item.precio_media||0).toFixed(2)}</span>` : ''}
+            </div>
+            <div class="menu-admin-actions">
+              <button class="btn-sm btn-secondary btn-edit-item" data-id="${item.id_articulo}">Editar</button>
+              <button class="btn-sm ${item.activo ? 'btn-warning' : 'btn-success'} btn-toggle-item" data-id="${item.id_articulo}" data-activo="${item.activo}">
+                ${item.activo ? 'Desactivar' : 'Activar'}
+              </button>
+            </div>
+          </div>
+        `).join('')}
       </div>
     </div>`;
 
-  // Render chart after DOM update
-  requestAnimationFrame(() => {
+  document.getElementById('btn-add-menu-item').onclick = () => showMenuItemForm(null);
+  container.querySelectorAll('.btn-edit-item').forEach(b => {
+    b.onclick = () => showMenuItemForm(parseInt(b.dataset.id));
+  });
+  container.querySelectorAll('.btn-toggle-item').forEach(b => {
+    b.onclick = async () => {
+      const id = parseInt(b.dataset.id);
+      const newActivo = b.dataset.activo === 'true' ? false : true;
+      await updateMenuItem({ id_articulo: id, activo: newActivo });
+      renderMenuAdmin(container);
+    };
+  });
+}
+
+async function showMenuItemForm(itemId) {
+  const item = itemId ? await getMenuItemById(itemId) : null;
+
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.id = 'modal-menu-item-form';
+  modal.innerHTML = `
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title">${item ? 'Editar artículo' : 'Nuevo artículo'}</div>
+      </div>
+      <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
+        <div class="form-field">
+          <label class="form-label">Nombre</label>
+          <input type="text" id="mi-nombre" value="${escAttr(item?.nombre || '')}" maxlength="80">
+        </div>
+        <div class="form-field">
+          <label class="form-label">Categoría</label>
+          <input type="text" id="mi-cat" value="${escAttr(item?.categoria || '')}" maxlength="40" list="cat-list">
+          <datalist id="cat-list">
+            <option value="Empanadas"><option value="Antojitos"><option value="Platillos"><option value="Bebidas">
+          </datalist>
+        </div>
+        <div class="form-field">
+          <label class="form-label">Precio completo ($)</label>
+          <input type="number" id="mi-precio" value="${item?.precio_completo || 0}" min="0" step="1">
+        </div>
+        <div class="form-row" style="gap:8px;align-items:center">
+          <label style="display:flex;align-items:center;gap:6px;font-size:14px">
+            <input type="checkbox" id="mi-tiene-media" ${item?.tiene_media ? 'checked' : ''}>
+            Tiene ½ orden
+          </label>
+        </div>
+        <div class="form-field" id="mi-media-row" style="${item?.tiene_media ? '' : 'display:none'}">
+          <label class="form-label">Precio ½ orden ($)</label>
+          <input type="number" id="mi-precio-media" value="${item?.precio_media || 0}" min="0" step="1">
+        </div>
+        <div id="mi-error" class="pin-error hidden"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="mi-cancel">Cancelar</button>
+        <button class="btn-primary" id="mi-save">Guardar</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(modal);
+
+  document.getElementById('mi-tiene-media').onchange = e => {
+    document.getElementById('mi-media-row').style.display = e.target.checked ? '' : 'none';
+  };
+  document.getElementById('mi-cancel').onclick = () => modal.remove();
+  document.getElementById('mi-save').onclick = async () => {
+    const nombre     = document.getElementById('mi-nombre').value.trim();
+    const categoria  = document.getElementById('mi-cat').value.trim();
+    const precio     = parseFloat(document.getElementById('mi-precio').value) || 0;
+    const tieneMedia = document.getElementById('mi-tiene-media').checked;
+    const precioMedia = tieneMedia ? (parseFloat(document.getElementById('mi-precio-media').value) || 0) : null;
+    const errEl = document.getElementById('mi-error');
+    if (!nombre || !categoria) {
+      if (errEl) { errEl.textContent = 'Nombre y categoría son requeridos.'; errEl.classList.remove('hidden'); }
+      return;
+    }
+    const data = { nombre, categoria, precio_completo: precio, tiene_media: tieneMedia, precio_media: precioMedia, activo: item ? item.activo : true };
+    if (item) {
+      await updateMenuItem({ ...data, id_articulo: item.id_articulo });
+    } else {
+      await saveMenuItem(data);
+    }
+    modal.remove();
+    const container = document.getElementById('admin-tab-content');
+    if (container) renderMenuAdmin(container);
+  };
+}
+
+/* ---------- Reportes Admin ---------- */
+async function renderReportesAdmin(container) {
+  container.innerHTML = `
+    <div class="admin-section">
+      <div class="admin-section-header">
+        <span class="admin-section-title">Reporte del día</span>
+        <input type="date" id="report-date" value="${todayStr()}" style="border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px">
+      </div>
+      <div id="report-stats" class="report-stats"></div>
+      <div class="admin-section-title" style="margin-top:16px">Ventas por hora</div>
+      <canvas id="hourly-chart" style="width:100%;border-radius:8px;background:var(--surface-1);padding:8px"></canvas>
+      <div class="admin-section-title" style="margin-top:16px">Top 5 artículos</div>
+      <div id="top-items-list"></div>
+      <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-secondary btn-sm" id="btn-backup-drive">Exportar a Drive</button>
+      </div>
+    </div>`;
+
+  const loadReport = async (date) => {
+    const stats = await getTodayStats(date);
+    const hourly = await getHourlyRevenue(date);
+    const topItems = await getTopItems(date);
+
+    const statsEl = document.getElementById('report-stats');
+    if (statsEl) {
+      statsEl.innerHTML = `
+        <div class="report-stat-card"><div class="stat-label">Ventas</div><div class="stat-value">$${stats.totalVentas.toFixed(2)}</div></div>
+        <div class="report-stat-card"><div class="stat-label">Órdenes</div><div class="stat-value">${stats.ordenesCompletadas}</div></div>
+        <div class="report-stat-card"><div class="stat-label">Ticket prom.</div><div class="stat-value">$${stats.ticketPromedio.toFixed(2)}</div></div>
+        <div class="report-stat-card"><div class="stat-label">T. prep. prom.</div><div class="stat-value">${stats.tiempoPrepPromedio}m</div></div>`;
+    }
+
     const canvas = document.getElementById('hourly-chart');
     if (canvas) renderHourlyChart(canvas, hourly);
-  });
+
+    const topEl = document.getElementById('top-items-list');
+    if (topEl) {
+      topEl.innerHTML = topItems.length === 0
+        ? '<div class="empty-state">Sin datos</div>'
+        : topItems.map(t => `<div class="top-item-row"><span>${t.rank}. ${esc(t.nombre)}</span><span>${t.cantidad} uds.</span></div>`).join('');
+    }
+  };
+
+  await loadReport(todayStr());
+  document.getElementById('report-date').onchange = e => loadReport(e.target.value);
+  document.getElementById('btn-backup-drive').onclick = async () => {
+    try {
+      if (!isConnected()) { showToast('Conecta Google primero en Configuración.'); return; }
+      await backupToDrive(await buildBackupCSV());
+      showToast('Backup exportado a Drive.');
+    } catch (e) { showToast('Error al exportar: ' + e.message); }
+  };
+}
+
+/* ---------- Config Admin ---------- */
+function renderConfigAdmin(container) {
+  const connected = isConnected();
+  container.innerHTML = `
+    <div class="admin-section">
+      <div class="admin-section-title">Google</div>
+      <div class="config-row">
+        <span>${connected ? '✅ Conectado' : '⬜ No conectado'}</span>
+        ${connected
+          ? '<button class="btn-danger btn-sm" id="btn-disconnect-google">Desconectar</button>'
+          : '<button class="btn-primary btn-sm" id="btn-connect-google">Conectar Google</button>'}
+      </div>
+    </div>
+    <div class="admin-section" style="margin-top:16px">
+      <div class="admin-section-title">Seguridad</div>
+      <div class="config-row">
+        <span>PIN de administrador</span>
+        <button class="btn-secondary btn-sm" id="btn-open-change-pin">Cambiar PIN</button>
+      </div>
+    </div>`;
+
+  if (connected) {
+    document.getElementById('btn-disconnect-google').onclick = () => {
+      showConfirm('¿Desconectar Google? Se perderá el acceso a Drive y email.', async () => {
+        await disconnectGoogle();
+        renderConfigAdmin(container);
+      });
+    };
+  } else {
+    document.getElementById('btn-connect-google').onclick = async () => {
+      try { await connectGoogle(); renderConfigAdmin(container); }
+      catch (e) { showToast('Error al conectar: ' + e.message); }
+    };
+  }
+  document.getElementById('btn-open-change-pin').onclick = () => {
+    document.getElementById('change-pin-current').value = '';
+    document.getElementById('change-pin-new1').value = '';
+    document.getElementById('change-pin-new2').value = '';
+    const errEl = document.getElementById('change-pin-error');
+    if (errEl) errEl.classList.add('hidden');
+    showModal('modal-change-pin');
+  };
 }
 
 /* =====================================================
-   CONFIG HELPERS
+   STATUS HELPERS
    ===================================================== */
-function getConfig() {
-  try {
-    return JSON.parse(localStorage.getItem('sj_config') || '{}');
-  } catch {
-    return {};
+function statusLabel(estado) {
+  switch (estado) {
+    case 'pendiente': return 'Capturando';
+    case 'hold':      return 'En espera';
+    case 'cobrada':   return 'Cobrada';
+    case 'cancelada': return 'Cancelada';
+    default:          return estado || '';
+  }
+}
+
+function statusClass(estado) {
+  switch (estado) {
+    case 'pendiente': return 'status-pendiente';
+    case 'hold':      return 'status-hold';
+    case 'cobrada':   return 'status-cobrada';
+    case 'cancelada': return 'status-cancelada';
+    default:          return '';
   }
 }
 
 /* =====================================================
-   NAV HELPERS
+   VIEW SWITCHING
    ===================================================== */
-function updateNavActive(view) {
-  document.querySelectorAll('.nav-item').forEach(item => {
-    item.classList.toggle('active', item.dataset.view === view);
+function showView(viewId) {
+  document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
+  const el = document.getElementById(viewId);
+  if (el) el.classList.remove('hidden');
+
+  // Update bottom nav
+  const viewMap = { 'view-home': 'home', 'view-kitchen': 'cocina', 'view-admin': 'admin' };
+  document.querySelectorAll('.nav-item').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === viewMap[viewId]);
   });
 }
 
 /* =====================================================
-   TOAST (simple feedback)
+   ESCAPE HELPERS
    ===================================================== */
-function showToast(msg) {
-  const toast = document.createElement('div');
-  toast.textContent = msg;
-  toast.style.cssText = `
-    position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
-    background:#1C2833;color:#fff;padding:10px 20px;border-radius:20px;
-    font-size:14px;font-weight:600;z-index:9999;
-    animation:fadeInOut 2.5s ease forwards;
-  `;
-  document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 2500);
-}
-
-/* =====================================================
-   UTILITY
-   ===================================================== */
-function escHtml(str) {
-  return String(str || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+function esc(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 function escAttr(str) {
-  return String(str || '').replace(/"/g, '&quot;');
-}
-
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  return String(str || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;');
 }
 
 /* =====================================================
-   EVENT DELEGATION — GLOBAL
+   GLOBAL EVENT DELEGATION
    ===================================================== */
 document.addEventListener('click', async (e) => {
-  const target = e.target.closest('[data-action]') || e.target;
+  const t = e.target;
 
-  // Banner close
-  if (target.classList.contains('banner-close')) {
-    target.closest('.banner')?.classList.add('hidden');
-    return;
-  }
-
-  // Banner "Ir a Admin" button
-  if (target.id === 'btn-banner-admin') {
-    navigate('./index.html?view=admin');
-    return;
-  }
-
-  // First launch modal dismiss
-  if (target.id === 'btn-first-launch-ok') {
-    localStorage.setItem('sj_first_launch_done', 'true');
-    hideModal('modal-first-launch');
-    return;
-  }
-
-  // Help button (re-open first launch modal)
-  if (target.id === 'btn-help') {
-    showModal('modal-first-launch');
-    return;
-  }
-
-  // Confirm modal cancel
-  if (target.classList.contains('btn-confirm-cancel')) {
-    hideModal('modal-confirm');
-    return;
-  }
-
-  // Nueva mesa button
-  if (target.id === 'btn-new-table') {
-    showModal('modal-nueva-mesa');
-    setTimeout(() => document.getElementById('nueva-mesa-input')?.focus(), 50);
-    return;
-  }
-
-  // Nueva mesa confirm
-  if (target.id === 'btn-nueva-mesa-ok') {
-    const input = document.getElementById('nueva-mesa-input');
-    const name  = input?.value.trim();
-    if (!name) { input?.focus(); return; }
-    const orderId = await saveOrder({ nombre_mesa: name, estado: 'pendiente' });
-    await snapshotInProgress();
-    broadcast({ type: 'ORDER_CREATED', orderId, nombreMesa: name });
-    hideModal('modal-nueva-mesa');
-    navigate(`./index.html?mesa=${orderId}`);
-    return;
-  }
-
-  // Nueva mesa cancel
-  if (target.id === 'btn-nueva-mesa-cancel') {
-    hideModal('modal-nueva-mesa');
-    return;
-  }
-
-  // Table card tap
-  if (target.closest('.table-card')) {
-    const card    = target.closest('.table-card');
-    const orderId = card.dataset.orderId;
-    if (orderId) navigate(`./index.html?mesa=${orderId}`);
-    return;
-  }
-
-  // Back button
-  if (target.id === 'btn-back' || target.closest('#btn-back')) {
-    navigate('./index.html');
-    return;
-  }
-
-  // Cancel mesa
-  if (target.id === 'btn-cancel-table') {
-    await cancelTable();
-    return;
-  }
-
-  // Add item full
-  if (target.classList.contains('btn-add-item-full')) {
-    const id = parseInt(target.dataset.id, 10);
-    await addItemToOrder(id, 'completa');
-    return;
-  }
-
-  // Add item half
-  if (target.classList.contains('btn-add-item-half')) {
-    const id = parseInt(target.dataset.id, 10);
-    await addItemToOrder(id, 'media');
-    return;
-  }
-
-  // Remove item from order
-  if (target.closest('.btn-remove-item')) {
-    const btn = target.closest('.btn-remove-item');
-    const idx = parseInt(btn.dataset.remove, 10);
-    await removeItemFromOrder(idx);
-    return;
-  }
-
-  // Send to kitchen
-  if (target.id === 'btn-send-kitchen') {
-    await sendToKitchen();
-    return;
-  }
-
-  // Cobrar
-  if (target.id === 'btn-cobrar') {
-    await openCheckout();
-    return;
-  }
-
-  // Kitchen — order ready
-  if (target.classList.contains('btn-order-ready')) {
-    const orderId = parseInt(target.dataset.orderId, 10);
-    await markOrderReady(orderId);
-    return;
-  }
-
-  // Bottom nav
-  if (target.closest('.nav-item')) {
-    const nav  = target.closest('.nav-item');
-    const view = nav.dataset.view;
+  // ---- Bottom nav ----
+  if (t.closest('.nav-item')) {
+    const view = t.closest('.nav-item').dataset.view;
     if (view === 'home')   navigate('./index.html');
     if (view === 'cocina') navigate('./index.html?view=cocina');
     if (view === 'admin')  navigate('./index.html?view=admin');
     return;
   }
 
-  // Checkout — payment toggle
-  if (target.classList.contains('payment-toggle-btn')) {
-    showPaymentMethod(target.dataset.method);
+  // ---- Banner close ----
+  if (t.classList.contains('banner-close')) {
+    t.closest('.banner')?.classList.add('hidden');
+    return;
+  }
+  if (t.id === 'btn-banner-admin') {
+    navigate('./index.html?view=admin');
     return;
   }
 
-  // Checkout — quick amounts
-  if (target.classList.contains('quick-amount-btn')) {
-    quickAmount(parseInt(target.dataset.amount, 10));
+  // ---- First launch OK ----
+  if (t.id === 'btn-first-launch-ok') {
+    localStorage.setItem('sj_first_launch_done', '1');
+    hideModal('modal-first-launch');
     return;
   }
 
-  // Checkout — numpad
-  if (target.classList.contains('numpad-key')) {
-    numpadPress(target.dataset.key);
+  // ---- Nueva mesa ----
+  if (t.id === 'btn-new-table') {
+    document.getElementById('nueva-mesa-input').value = '';
+    const errEl = document.getElementById('nueva-mesa-error');
+    if (errEl) { errEl.textContent = ''; errEl.classList.add('hidden'); }
+    showModal('modal-nueva-mesa');
+    setTimeout(() => document.getElementById('nueva-mesa-input')?.focus(), 50);
+    return;
+  }
+  if (t.id === 'btn-nueva-mesa-cancel') {
+    hideModal('modal-nueva-mesa');
+    return;
+  }
+  if (t.id === 'btn-nueva-mesa-ok') {
+    const input = document.getElementById('nueva-mesa-input');
+    const name  = (input?.value || '').trim();
+    if (!name) {
+      if (input) input.focus();
+      return;
+    }
+    // Duplicate name check
+    const openOrders = await getOpenOrders();
+    const nameLower  = name.toLowerCase();
+    const exists     = openOrders.some(o => o.nombre_mesa.toLowerCase().trim() === nameLower);
+    if (exists) {
+      const errEl = document.getElementById('nueva-mesa-error');
+      if (errEl) {
+        errEl.textContent = 'Ya hay una mesa abierta con ese nombre. Usa un nombre diferente.';
+        errEl.classList.remove('hidden');
+      }
+      if (input) input.focus();
+      return;
+    }
+    const errEl2 = document.getElementById('nueva-mesa-error');
+    if (errEl2) errEl2.classList.add('hidden');
+
+    const id = await saveOrder({ nombre_mesa: name, estado: 'pendiente', subtotal: 0, hora_orden: new Date().toISOString() });
+    await snapshotInProgress();
+    broadcast({ type: 'ORDER_CREATED', orderId: id, nombreMesa: name });
+    hideModal('modal-nueva-mesa');
+    navigate(`./index.html?mesa=${id}`);
     return;
   }
 
-  // Checkout — confirm payment
-  if (target.id === 'btn-confirm-payment') {
-    await confirmPayment();
+  // ---- Table card ----
+  const tableCard = t.closest('.table-card');
+  if (tableCard) {
+    const orderId = parseInt(tableCard.dataset.orderId);
+    navigate(`./index.html?mesa=${orderId}`);
     return;
   }
 
-  // Checkout — close (cancel checkout)
-  if (target.id === 'btn-checkout-cancel') {
+  // ---- Back button (order capture) ----
+  if (t.id === 'btn-back') {
+    showBackActionSheet();
+    return;
+  }
+
+  // ---- Hold table button ----
+  if (t.id === 'btn-hold-table') {
+    showConfirm('¿Poner esta mesa en espera?', () => holdTable(), 'Poner en espera');
+    return;
+  }
+
+  // ---- Cancel table button ----
+  if (t.id === 'btn-cancel-table') {
+    showConfirm('¿Cancelar esta mesa? Se perderán todos los artículos.', async () => {
+      localStorage.removeItem('sj_hold_' + currentOrderId);
+      await updateOrder({ id_orden: currentOrderId, estado: 'cancelada' });
+      await snapshotInProgress();
+      broadcast({ type: 'ORDER_CANCELLED', orderId: currentOrderId });
+      navigate('./index.html');
+    }, 'Cancelar mesa');
+    return;
+  }
+
+  // ---- Add item to order ----
+  if (t.classList.contains('btn-add-item')) {
+    const itemId = parseInt(t.dataset.itemId);
+    const porcion = t.dataset.porcion || 'completa';
+    await addItemToOrder(itemId, porcion);
+    return;
+  }
+
+  // ---- Qty controls ----
+  if (t.classList.contains('btn-qty-inc')) {
+    await adjustQty(parseInt(t.dataset.idx), 1);
+    return;
+  }
+  if (t.classList.contains('btn-qty-dec')) {
+    await adjustQty(parseInt(t.dataset.idx), -1);
+    return;
+  }
+
+  // ---- Remove item ----
+  if (t.classList.contains('btn-remove-item')) {
+    await removeItemFromOrder(parseInt(t.dataset.idx));
+    return;
+  }
+
+  // ---- Cobrar orden ----
+  if (t.id === 'btn-cobrar-orden') {
+    if (currentOrderItems.length === 0) {
+      showToast('Agrega al menos un artículo antes de cobrar.');
+      return;
+    }
+    openCheckout();
+    return;
+  }
+
+  // ---- Checkout cancel ----
+  if (t.id === 'btn-checkout-cancel') {
     hideModal('modal-checkout');
     return;
   }
 
-  // Change PIN
-  if (target.id === 'btn-do-change-pin') {
-    await doChangePin();
+  // ---- Discount pills ----
+  if (t.classList.contains('discount-pill')) {
+    document.querySelectorAll('.discount-pill').forEach(p => p.classList.remove('active'));
+    t.classList.add('active');
+    discountPct = parseInt(t.dataset.pct, 10) || 0;
+    const reasonRow = document.getElementById('discount-reason-row');
+    if (reasonRow) reasonRow.classList.toggle('hidden', discountPct === 0);
+    const discErr = document.getElementById('discount-error');
+    if (discErr) discErr.classList.add('hidden');
+    updateDiscountBreakdown();
     return;
   }
 
-  if (target.id === 'btn-change-pin-cancel') {
-    hideModal('modal-change-pin');
+  // ---- Payment method toggle ----
+  if (t.classList.contains('payment-toggle-btn')) {
+    document.querySelectorAll('.payment-toggle-btn').forEach(b => b.classList.remove('active'));
+    t.classList.add('active');
+    const method = t.dataset.method;
+    document.querySelectorAll('.payment-section').forEach(s => {
+      s.classList.toggle('hidden', s.dataset.method !== method);
+    });
+    // Card: always enable confirm button
+    const confirmBtn = document.getElementById('btn-confirm-payment');
+    if (method === 'tarjeta' && confirmBtn) confirmBtn.disabled = false;
+    if (method === 'efectivo' && confirmBtn) updateCashDisplay();
+    updateCardTotal();
     return;
   }
-});
 
-// Nueva mesa — enter key
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    const input = document.getElementById('nueva-mesa-input');
-    if (document.activeElement === input) {
-      document.getElementById('btn-nueva-mesa-ok')?.click();
+  // ---- Quick amounts ----
+  if (t.classList.contains('quick-amount-btn')) {
+    cashInput = String(parseInt(t.dataset.amount, 10) * 100);
+    updateCashDisplay();
+    return;
+  }
+
+  // ---- Numpad ----
+  if (t.classList.contains('numpad-key')) {
+    const key = t.dataset.key;
+    if (key === '⌫') {
+      cashInput = cashInput.slice(0, -1);
+    } else if (cashInput.length < 7) {
+      cashInput += key;
     }
+    updateCashDisplay();
+    return;
+  }
+
+  // ---- Confirm payment ----
+  if (t.id === 'btn-confirm-payment') {
+    await confirmPayment();
+    return;
+  }
+
+  // ---- Help ----
+  if (t.id === 'btn-help') {
+    showModal('modal-first-launch');
+    return;
+  }
+
+  // ---- Kitchen ready ----
+  if (t.classList.contains('kitchen-ready-btn')) {
+    const orderId = parseInt(t.dataset.orderId);
+    await markOrderReady(orderId);
+    return;
+  }
+
+  // ---- Change PIN ----
+  if (t.id === 'btn-change-pin-cancel') { hideModal('modal-change-pin'); return; }
+  if (t.id === 'btn-do-change-pin')    { await doChangePin(); return; }
+});
+
+/* ---- Input event delegation ---- */
+document.addEventListener('input', (e) => {
+  const t = e.target;
+
+  // Per-item notes
+  if (t.classList.contains('item-notes-input')) {
+    const idx = parseInt(t.dataset.lineIdx);
+    if (currentOrderItems[idx] !== undefined) {
+      currentOrderItems[idx].notas = t.value;
+      saveOrderSnapshot(currentOrderId);
+    }
+    return;
+  }
+
+  // Phone auto-format
+  if (t.id === 'customer-phone') {
+    const formatted = formatPhone(t.value);
+    t.value = formatted;
+    const errEl = document.getElementById('customer-phone-error');
+    if (errEl) errEl.classList.add('hidden');
+    return;
   }
 });
 
-async function doChangePin() {
-  const current = document.getElementById('change-pin-current').value.trim();
-  const new1    = document.getElementById('change-pin-new1').value.trim();
-  const new2    = document.getElementById('change-pin-new2').value.trim();
-  const errEl   = document.getElementById('change-pin-error');
-
-  const showErr = (msg) => { errEl.textContent = msg; errEl.classList.remove('hidden'); };
-
-  const storedHash  = localStorage.getItem('sj_admin_pin');
-  const currentHash = await hashPin(current);
-  if (currentHash !== storedHash) { showErr('PIN actual incorrecto.'); return; }
-  if (new1.length < 4)  { showErr('El nuevo PIN debe tener al menos 4 dígitos.'); return; }
-  if (!/^\d+$/.test(new1)) { showErr('Solo se permiten dígitos.'); return; }
-  if (new1 !== new2)  { showErr('Los PINs no coinciden.'); return; }
-
-  const newHash = await hashPin(new1);
-  localStorage.setItem('sj_admin_pin', newHash);
-  hideModal('modal-change-pin');
-  showToast('PIN actualizado');
-}
+/* ---- Keydown for nueva mesa Enter ---- */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.id === 'nueva-mesa-input') {
+    document.getElementById('btn-nueva-mesa-ok')?.click();
+  }
+});
 
 /* =====================================================
-   KICK OFF
+   BOOT
    ===================================================== */
-// Add toast keyframe
-const styleEl = document.createElement('style');
-styleEl.textContent = `
-  @keyframes fadeInOut {
-    0%   { opacity:0; transform:translate(-50%,10px); }
-    15%  { opacity:1; transform:translate(-50%,0); }
-    80%  { opacity:1; }
-    100% { opacity:0; transform:translate(-50%,-5px); }
-  }
-`;
-document.head.appendChild(styleEl);
-
 init();

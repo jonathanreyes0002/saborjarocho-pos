@@ -1,17 +1,16 @@
 /**
  * db.js — IndexedDB persistence layer for Sabor Jarocho
- * Database: "saborjarocho_db" v1
+ * Database: "saborjarocho_db" v2
  * Stores: ordenes, detalle_orden, menu_articulos
  */
 
-const DB_NAME = 'saborjarocho_db';
-const DB_VERSION = 1;
+const DB_NAME    = 'saborjarocho_db';
+const DB_VERSION = 2;
 
 let _db = null;
 
 /**
  * Open (or create) the IndexedDB database.
- * Returns a Promise that resolves to the IDBDatabase instance.
  */
 export function openDB() {
   if (_db) return Promise.resolve(_db);
@@ -20,43 +19,64 @@ export function openDB() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
 
     req.onupgradeneeded = (event) => {
-      const db = event.target.result;
+      const db         = event.target.result;
+      const tx         = event.target.transaction;
+      const oldVersion = event.oldVersion;
 
-      // ordenes store
-      if (!db.objectStoreNames.contains('ordenes')) {
+      /* ── Version 1: create stores ── */
+      if (oldVersion < 1) {
         const ordenesStore = db.createObjectStore('ordenes', {
-          keyPath: 'id_orden',
-          autoIncrement: true
+          keyPath: 'id_orden', autoIncrement: true
         });
         ordenesStore.createIndex('fecha',       'fecha',       { unique: false });
         ordenesStore.createIndex('estado',      'estado',      { unique: false });
         ordenesStore.createIndex('nombre_mesa', 'nombre_mesa', { unique: false });
-      }
 
-      // detalle_orden store
-      if (!db.objectStoreNames.contains('detalle_orden')) {
         const detalleStore = db.createObjectStore('detalle_orden', {
-          keyPath: 'id_detalle',
-          autoIncrement: true
+          keyPath: 'id_detalle', autoIncrement: true
         });
         detalleStore.createIndex('id_orden', 'id_orden', { unique: false });
-      }
 
-      // menu_articulos store
-      if (!db.objectStoreNames.contains('menu_articulos')) {
         const menuStore = db.createObjectStore('menu_articulos', {
-          keyPath: 'id_articulo',
-          autoIncrement: true
+          keyPath: 'id_articulo', autoIncrement: true
         });
         menuStore.createIndex('categoria',     'categoria',     { unique: false });
         menuStore.createIndex('activo',        'activo',        { unique: false });
         menuStore.createIndex('orden_display', 'orden_display', { unique: false });
       }
+
+      /* ── Version 2: add new fields to existing records via cursors ── */
+      if (oldVersion >= 1 && oldVersion < 2) {
+        // Migrate detalle_orden — add notas field
+        tx.objectStore('detalle_orden').openCursor().onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            const rec = cursor.value;
+            if (rec.notas === undefined) { rec.notas = ''; cursor.update(rec); }
+            cursor.continue();
+          }
+        };
+
+        // Migrate ordenes — add customer + discount fields
+        tx.objectStore('ordenes').openCursor().onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            const rec = cursor.value;
+            let changed = false;
+            if (rec.cliente_email    === undefined) { rec.cliente_email    = null; changed = true; }
+            if (rec.cliente_telefono === undefined) { rec.cliente_telefono = null; changed = true; }
+            if (rec.descuento_pct    === undefined) { rec.descuento_pct    = 0;    changed = true; }
+            if (rec.descuento_monto  === undefined) { rec.descuento_monto  = 0;    changed = true; }
+            if (rec.descuento_motivo === undefined) { rec.descuento_motivo = null; changed = true; }
+            if (changed) cursor.update(rec);
+            cursor.continue();
+          }
+        };
+      }
     };
 
     req.onsuccess = (event) => {
       _db = event.target.result;
-      // Seed menu on first launch
       if (!localStorage.getItem('sj_seeded')) {
         seedMenu(_db).then(() => resolve(_db));
       } else {
@@ -64,52 +84,50 @@ export function openDB() {
       }
     };
 
-    req.onerror = (event) => {
-      reject(event.target.error);
-    };
+    req.onerror = (event) => reject(event.target.error);
   });
 }
 
 /* =====================================================
-   MENU SEEDING
+   MENU SEEDING (with real default prices)
    ===================================================== */
 const SEED_DATA = [
-  { categoria: 'Empanadas',       nombre: 'Queso',             tiene_media: true,  orden_display: 1 },
-  { categoria: 'Empanadas',       nombre: 'Pollo',             tiene_media: true,  orden_display: 2 },
-  { categoria: 'Empanadas',       nombre: 'Carne molida',      tiene_media: true,  orden_display: 3 },
-  { categoria: 'Chiles rellenos', nombre: 'Pollo',             tiene_media: true,  orden_display: 1 },
-  { categoria: 'Chiles rellenos', nombre: 'Carne molida',      tiene_media: true,  orden_display: 2 },
-  { categoria: 'Tostadas',        nombre: 'Deshebrada',        tiene_media: true,  orden_display: 1 },
-  { categoria: 'Tostadas',        nombre: 'Pollo',             tiene_media: true,  orden_display: 2 },
-  { categoria: 'Tostadas',        nombre: 'Carne molida',      tiene_media: true,  orden_display: 3 },
-  { categoria: 'Garnachas',       nombre: 'Deshebrada',        tiene_media: true,  orden_display: 1 },
-  { categoria: 'Picaditas',       nombre: 'Salsa',             tiene_media: true,  orden_display: 1 },
-  { categoria: 'Picaditas',       nombre: 'Frijoles',          tiene_media: true,  orden_display: 2 },
-  { categoria: 'Picaditas',       nombre: 'Pollo',             tiene_media: true,  orden_display: 3 },
-  { categoria: 'Picaditas',       nombre: 'Carne molida',      tiene_media: true,  orden_display: 4 },
-  { categoria: 'Picaditas',       nombre: 'Deshebrada',        tiene_media: true,  orden_display: 5 },
-  { categoria: 'Platillos',       nombre: 'Plátanos rellenos', tiene_media: false, orden_display: 1 },
-  { categoria: 'Platillos',       nombre: 'Plátanos fritos',   tiene_media: false, orden_display: 2 },
-  { categoria: 'Platillos',       nombre: 'Papas preparadas',  tiene_media: false, orden_display: 3 },
-  { categoria: 'Platillos',       nombre: 'Tacos dorados',     tiene_media: false, orden_display: 4 },
-  { categoria: 'Platillos',       nombre: 'Huevos preparados', tiene_media: false, orden_display: 5 },
-  { categoria: 'Bebidas',         nombre: 'Refresco',          tiene_media: false, orden_display: 1 },
-  { categoria: 'Bebidas',         nombre: 'Agua fresca',       tiene_media: false, orden_display: 2 },
-  { categoria: 'Bebidas',         nombre: 'Agua natural',      tiene_media: false, orden_display: 3 },
+  { categoria: 'Empanadas',       nombre: 'Queso',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
+  { categoria: 'Empanadas',       nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
+  { categoria: 'Empanadas',       nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 3 },
+  { categoria: 'Chiles rellenos', nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
+  { categoria: 'Chiles rellenos', nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
+  { categoria: 'Tostadas',        nombre: 'Deshebrada',        tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
+  { categoria: 'Tostadas',        nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
+  { categoria: 'Tostadas',        nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 3 },
+  { categoria: 'Garnachas',       nombre: 'Deshebrada',        tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
+  { categoria: 'Picaditas',       nombre: 'Salsa',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 1 },
+  { categoria: 'Picaditas',       nombre: 'Frijoles',          tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 2 },
+  { categoria: 'Picaditas',       nombre: 'Pollo',             tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 3 },
+  { categoria: 'Picaditas',       nombre: 'Carne molida',      tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 4 },
+  { categoria: 'Picaditas',       nombre: 'Deshebrada',        tiene_media: true,  precio_completo: 160, precio_media: 80,   orden_display: 5 },
+  { categoria: 'Platillos',       nombre: 'Plátanos rellenos', tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
+  { categoria: 'Platillos',       nombre: 'Plátanos fritos',   tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
+  { categoria: 'Platillos',       nombre: 'Papas preparadas',  tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
+  { categoria: 'Platillos',       nombre: 'Tacos dorados',     tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 4 },
+  { categoria: 'Platillos',       nombre: 'Huevos preparados', tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 5 },
+  { categoria: 'Bebidas',         nombre: 'Refresco',          tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 1 },
+  { categoria: 'Bebidas',         nombre: 'Agua fresca',       tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 2 },
+  { categoria: 'Bebidas',         nombre: 'Agua natural',      tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 3 },
 ];
 
 async function seedMenu(db) {
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('menu_articulos', 'readwrite');
+    const tx    = db.transaction('menu_articulos', 'readwrite');
     const store = tx.objectStore('menu_articulos');
-    const now = new Date().toISOString();
+    const now   = new Date().toISOString();
 
     SEED_DATA.forEach(item => {
       store.add({
         categoria:          item.categoria,
         nombre:             item.nombre,
-        precio_completo:    0,
-        precio_media:       item.tiene_media ? 0 : null,
+        precio_completo:    item.precio_completo,
+        precio_media:       item.precio_media,
         tiene_media:        item.tiene_media,
         activo:             true,
         orden_display:      item.orden_display,
@@ -117,31 +135,43 @@ async function seedMenu(db) {
       });
     });
 
-    tx.oncomplete = () => {
-      localStorage.setItem('sj_seeded', 'true');
-      resolve();
-    };
-    tx.onerror = (e) => reject(e.target.error);
+    tx.oncomplete = () => { localStorage.setItem('sj_seeded', 'true'); resolve(); };
+    tx.onerror    = (e) => reject(e.target.error);
   });
+}
+
+/**
+ * One-time price migration for existing installs that have precio_completo = 0.
+ * Key: sj_prices_seeded_v2
+ */
+export async function migratePricesV2() {
+  if (localStorage.getItem('sj_prices_seeded_v2') === 'true') return;
+
+  const db    = await openDB();
+  const items = await getMenuItems();
+
+  const zeroPriced = items.filter(i => i.precio_completo === 0);
+  if (zeroPriced.length === 0) {
+    localStorage.setItem('sj_prices_seeded_v2', 'true');
+    return;
+  }
+
+  for (const item of zeroPriced) {
+    if (item.categoria === 'Bebidas') {
+      await updateMenuItem(item.id_articulo, { precio_completo: 30, precio_media: null });
+    } else {
+      const updates = { precio_completo: 160 };
+      if (item.tiene_media) updates.precio_media = 80;
+      await updateMenuItem(item.id_articulo, updates);
+    }
+  }
+
+  localStorage.setItem('sj_prices_seeded_v2', 'true');
 }
 
 /* =====================================================
    HELPERS
    ===================================================== */
-function txPromise(tx) {
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = (e) => reject(e.target.error);
-  });
-}
-
-function requestPromise(req) {
-  return new Promise((resolve, reject) => {
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror  = (e) => reject(e.target.error);
-  });
-}
-
 function getAllFromIndex(db, storeName, indexName, value) {
   return new Promise((resolve, reject) => {
     const tx    = db.transaction(storeName, 'readonly');
@@ -156,10 +186,6 @@ function getAllFromIndex(db, storeName, indexName, value) {
 /* =====================================================
    ORDENES CRUD
    ===================================================== */
-
-/**
- * Save a new order. Returns Promise<id_orden>
- */
 export async function saveOrder(data) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -167,46 +193,45 @@ export async function saveOrder(data) {
     const store = tx.objectStore('ordenes');
     const req   = store.add({
       nombre_mesa:            data.nombre_mesa,
-      fecha:                  data.fecha       || todayStr(),
-      hora_orden:             data.hora_orden  || new Date().toISOString(),
-      hora_enviada_cocina:    data.hora_enviada_cocina    || null,
-      hora_completada:        data.hora_completada        || null,
-      tiempo_preparacion_min: data.tiempo_preparacion_min || null,
-      metodo_pago:            data.metodo_pago            || null,
-      subtotal:               data.subtotal               || 0,
-      efectivo_recibido:      data.efectivo_recibido      || null,
-      cambio:                 data.cambio                 || null,
-      ticket_enviado:         data.ticket_enviado         || false,
-      ticket_email:           data.ticket_email           || null,
-      folio:                  data.folio                  || null,
-      estado:                 data.estado                 || 'pendiente'
+      fecha:                  data.fecha                  || todayStr(),
+      hora_orden:             data.hora_orden              || new Date().toISOString(),
+      hora_enviada_cocina:    data.hora_enviada_cocina     || null,
+      hora_completada:        data.hora_completada         || null,
+      tiempo_preparacion_min: data.tiempo_preparacion_min  || null,
+      metodo_pago:            data.metodo_pago             || null,
+      subtotal:               data.subtotal                || 0,
+      efectivo_recibido:      data.efectivo_recibido       || null,
+      cambio:                 data.cambio                  || null,
+      ticket_enviado:         data.ticket_enviado          || false,
+      ticket_email:           data.ticket_email            || null,
+      folio:                  data.folio                   || null,
+      estado:                 data.estado                  || 'pendiente',
+      cliente_email:          data.cliente_email           || null,
+      cliente_telefono:       data.cliente_telefono        || null,
+      descuento_pct:          data.descuento_pct           || 0,
+      descuento_monto:        data.descuento_monto         || 0,
+      descuento_motivo:       data.descuento_motivo        || null,
     });
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
   });
 }
 
-/**
- * Update specific fields on an existing order.
- */
 export async function updateOrder(id_orden, changes) {
   const db    = await openDB();
   const order = await getOrder(id_orden);
   if (!order) throw new Error(`Order ${id_orden} not found`);
 
   return new Promise((resolve, reject) => {
-    const tx    = db.transaction('ordenes', 'readwrite');
-    const store = tx.objectStore('ordenes');
+    const tx      = db.transaction('ordenes', 'readwrite');
+    const store   = tx.objectStore('ordenes');
     const updated = Object.assign({}, order, changes, { id_orden });
-    const req = store.put(updated);
+    const req     = store.put(updated);
     req.onsuccess = () => resolve();
     req.onerror   = (e) => reject(e.target.error);
   });
 }
 
-/**
- * Get a single order by id. Returns Promise<order|undefined>
- */
 export async function getOrder(id_orden) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -219,7 +244,7 @@ export async function getOrder(id_orden) {
 }
 
 /**
- * Get all open orders (not cobrada or cancelada).
+ * Open orders shown on Home: pendiente + hold (not cobrada/cancelada).
  */
 export async function getOpenOrders() {
   const db = await openDB();
@@ -236,8 +261,22 @@ export async function getOpenOrders() {
 }
 
 /**
- * Get all orders for a specific date (YYYY-MM-DD).
+ * Kitchen orders: cobrada + hora_completada IS NULL (paid but not yet ready).
  */
+export async function getKitchenOrders() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx    = db.transaction('ordenes', 'readonly');
+    const store = tx.objectStore('ordenes');
+    const req   = store.getAll();
+    req.onsuccess = (e) => {
+      const all = e.target.result || [];
+      resolve(all.filter(o => o.estado === 'cobrada' && !o.hora_completada));
+    };
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
 export async function getOrdersByDate(date) {
   const db = await openDB();
   return getAllFromIndex(db, 'ordenes', 'fecha', date);
@@ -246,40 +285,31 @@ export async function getOrdersByDate(date) {
 /* =====================================================
    DETALLE_ORDEN CRUD
    ===================================================== */
-
-/**
- * Save a new order detail line. Returns Promise<id_detalle>
- */
 export async function saveDetalle(data) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx    = db.transaction('detalle_orden', 'readwrite');
     const store = tx.objectStore('detalle_orden');
     const req   = store.add({
-      id_orden:       data.id_orden,
-      categoria:      data.categoria,
-      articulo:       data.articulo,
-      porcion:        data.porcion        || 'completa',
-      cantidad:       data.cantidad       || 1,
+      id_orden:        data.id_orden,
+      categoria:       data.categoria,
+      articulo:        data.articulo,
+      porcion:         data.porcion         || 'completa',
+      cantidad:        data.cantidad        || 1,
       precio_unitario: data.precio_unitario || 0,
-      subtotal_linea: data.subtotal_linea  || 0
+      subtotal_linea:  data.subtotal_linea  || 0,
+      notas:           data.notas           || '',
     });
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror   = (e) => reject(e.target.error);
   });
 }
 
-/**
- * Get all detail lines for an order.
- */
 export async function getDetallesByOrder(id_orden) {
   const db = await openDB();
   return getAllFromIndex(db, 'detalle_orden', 'id_orden', id_orden);
 }
 
-/**
- * Delete all detail lines for an order (used when re-sending to kitchen).
- */
 export async function deleteDetallesByOrder(id_orden) {
   const db      = await openDB();
   const details = await getDetallesByOrder(id_orden);
@@ -295,11 +325,6 @@ export async function deleteDetallesByOrder(id_orden) {
 /* =====================================================
    MENU_ARTICULOS CRUD
    ===================================================== */
-
-/**
- * Get all menu items, optionally filtered.
- * opts: { activo: bool, categoria: string }
- */
 export async function getMenuItems(opts = {}) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -308,13 +333,8 @@ export async function getMenuItems(opts = {}) {
     const req   = store.getAll();
     req.onsuccess = (e) => {
       let items = e.target.result || [];
-      if (opts.activo !== undefined) {
-        items = items.filter(i => i.activo === opts.activo);
-      }
-      if (opts.categoria) {
-        items = items.filter(i => i.categoria === opts.categoria);
-      }
-      // Sort by categoria then orden_display
+      if (opts.activo !== undefined) items = items.filter(i => i.activo === opts.activo);
+      if (opts.categoria)            items = items.filter(i => i.categoria === opts.categoria);
       items.sort((a, b) => {
         if (a.categoria < b.categoria) return -1;
         if (a.categoria > b.categoria) return 1;
@@ -326,9 +346,6 @@ export async function getMenuItems(opts = {}) {
   });
 }
 
-/**
- * Save a new menu item. Returns Promise<id_articulo>
- */
 export async function saveMenuItem(data) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -349,17 +366,14 @@ export async function saveMenuItem(data) {
   });
 }
 
-/**
- * Update specific fields on a menu item.
- */
 export async function updateMenuItem(id_articulo, changes) {
   const db   = await openDB();
   const item = await getMenuItemById(id_articulo);
   if (!item) throw new Error(`MenuItem ${id_articulo} not found`);
 
   return new Promise((resolve, reject) => {
-    const tx    = db.transaction('menu_articulos', 'readwrite');
-    const store = tx.objectStore('menu_articulos');
+    const tx      = db.transaction('menu_articulos', 'readwrite');
+    const store   = tx.objectStore('menu_articulos');
     const updated = Object.assign({}, item, changes, {
       id_articulo,
       fecha_modificacion: new Date().toISOString()
@@ -370,9 +384,6 @@ export async function updateMenuItem(id_articulo, changes) {
   });
 }
 
-/**
- * Delete a menu item by id.
- */
 export async function deleteMenuItem(id_articulo) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -384,9 +395,6 @@ export async function deleteMenuItem(id_articulo) {
   });
 }
 
-/**
- * Get a single menu item by id.
- */
 export async function getMenuItemById(id_articulo) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
@@ -401,11 +409,6 @@ export async function getMenuItemById(id_articulo) {
 /* =====================================================
    CRASH RECOVERY
    ===================================================== */
-
-/**
- * Snapshot all in-progress orders to localStorage.
- * Called after every order state change.
- */
 export async function snapshotInProgress() {
   try {
     const open = await getOpenOrders();
@@ -419,18 +422,12 @@ export async function snapshotInProgress() {
   }
 }
 
-/**
- * On app load: check sj_orders_inprogress, verify against IndexedDB,
- * re-insert any missing ones. Returns count of recovered orders.
- */
 export async function recoverOrders() {
   const raw = localStorage.getItem('sj_orders_inprogress');
   if (!raw) return 0;
 
   let snapshot;
-  try {
-    snapshot = JSON.parse(raw);
-  } catch {
+  try { snapshot = JSON.parse(raw); } catch {
     localStorage.removeItem('sj_orders_inprogress');
     return 0;
   }
@@ -445,7 +442,6 @@ export async function recoverOrders() {
     try {
       const existing = await getOrder(order.id_orden);
       if (!existing) {
-        // Re-insert the order (without id so autoIncrement works)
         const { id_orden, ...orderData } = order;
         await saveOrder(orderData);
         recovered++;
@@ -454,21 +450,16 @@ export async function recoverOrders() {
       console.warn('recoverOrders error:', e);
     }
   }
-
   return recovered;
 }
 
 /* =====================================================
    UTILITY
    ===================================================== */
-
 export function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
-/**
- * Generate folio for today. Format: YYYYMMDD-NNN
- */
 export function generateFolio() {
   const date = todayStr();
   const key  = `sj_folio_${date}`;
