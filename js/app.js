@@ -1466,4 +1466,16 @@ document.addEventListener('keydown', (e) => {
 /* =====================================================
    BOOT
    ===================================================== */
-init();
+document.addEventListener('DOMContentLoaded', () => {
+  init().catch(err => {
+    console.error('Sabor Jarocho init error:', err);
+    document.body.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;
+                  justify-content:center;height:100vh;font-family:sans-serif;
+                  padding:24px;text-align:center;">
+        <div style="font-size:48px;margin-bottom:16px">⚠️</div>
+        <h2 style="color:#c0392b;margin:0 0 8px">Error al iniciar</h2>
+        <p>${err.message || err}</p>
+      </div>`;
+  });
+});
