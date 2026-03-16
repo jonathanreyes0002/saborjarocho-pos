@@ -8,7 +8,8 @@ import {
   getMenuItems, saveMenuItem, updateMenuItem, deleteMenuItem,
   getMenuItemById, snapshotInProgress, recoverOrders,
   generateFolio, todayStr, getOrdersByDate,
-  getKitchenOrders, migratePricesV2, dedupMenuItems, isPieceCategory
+  getKitchenOrders, migratePricesV2, migratePricesV3, dedupMenuItems,
+  isPieceCategory, getOrdersInRange
 } from './db.js';
 import { broadcast, listenSync } from './sync.js';
 import {
@@ -31,7 +32,8 @@ let discountPct       = 0;
 let historialTimer    = null;
 let metricasTimer     = null;
 
-const pieceQty = {};   // { [id_articulo]: number } — qty selector in menu panel
+const pieceQty = {};   // { [id_articulo]: number } — qty selector for piece categories
+const regQty   = {};   // { [`${id}_c`|`${id}_m`]: number } — qty selector for regular items
 
 /* =====================================================
    CONFIG HELPERS
@@ -70,6 +72,7 @@ async function init() {
   await openDB();
 
   await migratePricesV2();
+  await migratePricesV3();
 
   // One-time deduplication
   if (!localStorage.getItem('sj_dedup_done')) {
@@ -250,7 +253,7 @@ async function renderMenuPanel() {
   }
 
   scroll.innerHTML = Object.entries(cats).map(([cat, catItems]) => {
-    const ispiece = isPieceCategory(cat);
+    const ispiece  = isPieceCategory(cat);
     const isBebida = cat === 'Bebidas';
 
     const itemsHtml = catItems.map(item => {
@@ -260,35 +263,56 @@ async function renderMenuPanel() {
       if (ispiece) {
         const qty = pieceQty[id] || 1;
         return `
-          <div class="piece-row">
-            <div>
-              <div class="piece-item-name">${esc(item.nombre)}</div>
-              <div class="piece-item-price">$${price.toFixed(2)} / pz</div>
+          <div class="menu-item-row">
+            <div class="menu-item-info">
+              <div class="menu-item-name">${esc(item.nombre)}</div>
+              <div class="menu-item-price">$${price.toFixed(2)} / pz</div>
             </div>
-            <div class="piece-controls">
-              <button class="btn-piece-dec" data-item-id="${id}">−</button>
-              <span class="piece-count" id="pc-${id}">${qty}</span>
-              <button class="btn-piece-inc" data-item-id="${id}">+</button>
-              <button class="btn-add-pieces" data-item-id="${id}">Agregar ${qty} pz</button>
+            <div class="menu-item-controls">
+              <div class="qty-control-row">
+                <button class="btn-piece-dec" data-item-id="${id}">−</button>
+                <span class="menu-qty" id="pc-${id}">${qty}</span>
+                <button class="btn-piece-inc" data-item-id="${id}">+</button>
+                <button class="btn-add-pieces" data-item-id="${id}">Agregar ${qty} pz</button>
+              </div>
             </div>
           </div>`;
       }
 
-      const porcion = isBebida ? 'unidad' : 'completa';
-      const label   = isBebida ? '1 unidad' : '1 orden';
+      const porcion    = isBebida ? 'unidad' : 'completa';
+      const qtyC       = regQty[`${id}_c`] || 1;
+      const addLabelC  = isBebida
+        ? `Agregar ${qtyC} unidad${qtyC !== 1 ? 'es' : ''}`
+        : `Agregar ${qtyC} orden${qtyC !== 1 ? 'es' : ''}`;
+      const priceLabel = item.tiene_media && !isBebida
+        ? `$${price.toFixed(2)} · ½ $${(item.precio_media || 0).toFixed(2)}`
+        : `$${price.toFixed(2)}`;
+
+      let mediaRow = '';
+      if (item.tiene_media && !isBebida) {
+        const qtyM = regQty[`${id}_m`] || 1;
+        mediaRow = `
+              <div class="qty-control-row media-qty-row">
+                <button class="btn-item-dec" data-item-id="${id}" data-porcion="media">−</button>
+                <span class="menu-qty" id="iq-${id}_m">${qtyM}</span>
+                <button class="btn-item-inc" data-item-id="${id}" data-porcion="media">+</button>
+                <button class="btn-add-order media-add-btn" data-item-id="${id}" data-porcion="media">Agregar ${qtyM} ½</button>
+              </div>`;
+      }
+
       return `
         <div class="menu-item-row">
-          <div class="menu-item-name">${esc(item.nombre)}</div>
-          <div class="menu-item-prices">
-            <button class="btn-add-item btn-add-full"
-              data-item-id="${id}" data-porcion="${porcion}">
-              ${label} — $${price.toFixed(2)}
-            </button>
-            ${item.tiene_media && !isBebida ? `
-            <button class="btn-add-item btn-add-media"
-              data-item-id="${id}" data-porcion="media">
-              ½ orden — $${(item.precio_media || 0).toFixed(2)}
-            </button>` : ''}
+          <div class="menu-item-info">
+            <div class="menu-item-name">${esc(item.nombre)}</div>
+            <div class="menu-item-price">${priceLabel}</div>
+          </div>
+          <div class="menu-item-controls">
+            <div class="qty-control-row">
+              <button class="btn-item-dec" data-item-id="${id}" data-porcion="${porcion}">−</button>
+              <span class="menu-qty" id="iq-${id}_c">${qtyC}</span>
+              <button class="btn-item-inc" data-item-id="${id}" data-porcion="${porcion}">+</button>
+              <button class="btn-add-order" data-item-id="${id}" data-porcion="${porcion}">${addLabelC}</button>
+            </div>${mediaRow}
           </div>
         </div>`;
     }).join('');
@@ -307,6 +331,21 @@ function updatePieceRow(itemId) {
   if (countEl) countEl.textContent = qty;
   const addBtn = document.querySelector(`.btn-add-pieces[data-item-id="${itemId}"]`);
   if (addBtn) addBtn.textContent = `Agregar ${qty} pz`;
+}
+
+function updateRegQtyRow(itemId, porcion) {
+  const key     = porcion === 'media' ? `${itemId}_m` : `${itemId}_c`;
+  const qty     = regQty[key] || 1;
+  const countEl = document.getElementById('iq-' + key);
+  if (countEl) countEl.textContent = qty;
+  const addBtn  = document.querySelector(`.btn-add-order[data-item-id="${itemId}"][data-porcion="${porcion}"]`);
+  if (addBtn) {
+    let label;
+    if (porcion === 'media')       label = `Agregar ${qty} ½`;
+    else if (porcion === 'unidad') label = `Agregar ${qty} unidad${qty !== 1 ? 'es' : ''}`;
+    else                           label = `Agregar ${qty} orden${qty !== 1 ? 'es' : ''}`;
+    addBtn.textContent = label;
+  }
 }
 
 function renderOrderPanel() {
@@ -385,9 +424,9 @@ async function addItemToOrder(itemId, porcion, qty = 1) {
   } else {
     const existing = currentOrderItems.find(l => l.item.id_articulo === itemId && l.porcion === porcion);
     if (existing) {
-      existing.qty = (existing.qty || 1) + 1;
+      existing.qty = (existing.qty || 1) + qty;
     } else {
-      currentOrderItems.push({ item, porcion, qty: 1, notas: '', isPiece: false });
+      currentOrderItems.push({ item, porcion, qty, notas: '', isPiece: false });
     }
   }
 
@@ -1051,10 +1090,64 @@ async function showMenuItemForm(itemId) {
   };
 }
 
+/* ---------- CSV Export ---------- */
+async function exportHistorialCSV(from, to) {
+  try {
+    const orders   = await getOrdersInRange(from, to);
+    const cobradas = orders.filter(o => o.estado === 'cobrada');
+    cobradas.sort((a, b) => (a.hora_orden || '') < (b.hora_orden || '') ? -1 : 1);
+    const headers = ['fecha','hora','folio','mesa','articulo','categoria','porcion','cantidad',
+      'precio_unitario','subtotal_linea','descuento_pct','total_orden','metodo_pago',
+      'cliente_email','cliente_telefono','notas'];
+    const rows = [];
+    for (const o of cobradas) {
+      const detalles = await getDetallesByOrder(o.id_orden);
+      const hora = o.hora_orden
+        ? new Date(o.hora_orden).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' })
+        : '';
+      for (const d of detalles) {
+        rows.push([
+          o.fecha || '', hora,
+          o.folio || '', o.nombre_mesa || '',
+          d.articulo || '', d.categoria || '',
+          d.porcion || '', d.cantidad || 1,
+          d.precio_unitario || 0, d.subtotal_linea || 0,
+          o.descuento_pct || 0, o.subtotal || 0,
+          o.metodo_pago || '', o.cliente_email || '',
+          o.cliente_telefono || '', d.notas || ''
+        ]);
+      }
+    }
+    const csv  = [headers, ...rows]
+      .map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `SaborJarocho_Historial_${todayStr()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Historial exportado');
+  } catch (e) { showToast('Error al exportar: ' + e.message); }
+}
+
 /* ---------- Reportes Tab ---------- */
 async function renderReportesAdmin(container) {
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   container.innerHTML = `
     <div class="admin-section">
+      <div class="export-row">
+        <div class="export-date-range">
+          <label class="export-date-label">Desde</label>
+          <input type="date" id="export-from" value="${thirtyDaysAgo}">
+          <label class="export-date-label">Hasta</label>
+          <input type="date" id="export-to" value="${todayStr()}">
+        </div>
+        <button class="btn-primary btn-sm" id="btn-export-csv">Exportar historial a Excel</button>
+      </div>
       <div class="admin-section-header">
         <span class="admin-section-title">Reporte del día</span>
         <input type="date" id="report-date" value="${todayStr()}" style="border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:13px">
@@ -1089,6 +1182,11 @@ async function renderReportesAdmin(container) {
 
   await loadReport(todayStr());
   document.getElementById('report-date').onchange = e => loadReport(e.target.value);
+  document.getElementById('btn-export-csv').onclick = () => {
+    const from = document.getElementById('export-from').value || thirtyDaysAgo;
+    const to   = document.getElementById('export-to').value   || todayStr();
+    exportHistorialCSV(from, to);
+  };
   document.getElementById('btn-backup-drive').onclick = async () => {
     try {
       if (!isConnected()) { showToast('Conecta Google primero en Configuración.'); return; }
@@ -1477,6 +1575,27 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  // ---- Menu: regular item qty dec/inc/add ----
+  if (t.classList.contains('btn-item-dec')) {
+    const id = parseInt(t.dataset.itemId), por = t.dataset.porcion;
+    const key = por === 'media' ? `${id}_m` : `${id}_c`;
+    regQty[key] = Math.max(1, (regQty[key] || 1) - 1);
+    updateRegQtyRow(id, por); return;
+  }
+  if (t.classList.contains('btn-item-inc')) {
+    const id = parseInt(t.dataset.itemId), por = t.dataset.porcion;
+    const key = por === 'media' ? `${id}_m` : `${id}_c`;
+    regQty[key] = Math.min(9, (regQty[key] || 1) + 1);
+    updateRegQtyRow(id, por); return;
+  }
+  if (t.classList.contains('btn-add-order')) {
+    const id  = parseInt(t.dataset.itemId), por = t.dataset.porcion;
+    const key = por === 'media' ? `${id}_m` : `${id}_c`;
+    const qty = regQty[key] || 1;
+    await addItemToOrder(id, por, qty);
+    regQty[key] = 1; updateRegQtyRow(id, por); return;
+  }
+
   // ---- Menu: piece qty dec/inc ----
   if (t.classList.contains('btn-piece-dec')) {
     const id = parseInt(t.dataset.itemId);
@@ -1585,4 +1704,11 @@ document.addEventListener('keydown', e => {
 /* =====================================================
    BOOT
    ===================================================== */
-init();
+document.addEventListener('DOMContentLoaded', () => {
+  init().catch(err => {
+    console.error('Sabor Jarocho init error:', err);
+    document.body.innerHTML = `<div style="padding:24px;text-align:center;">
+      <h2 style="color:#c0392b">Error al iniciar</h2>
+      <p>${err.message || err}</p></div>`;
+  });
+});

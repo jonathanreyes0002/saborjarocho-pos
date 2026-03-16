@@ -95,25 +95,25 @@ export function openDB() {
    MENU SEEDING (count-guarded — never seeds twice)
    ===================================================== */
 const SEED_DATA = [
-  { categoria: 'Empanadas',       nombre: 'Queso',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
-  { categoria: 'Empanadas',       nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
-  { categoria: 'Empanadas',       nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
-  { categoria: 'Chiles rellenos', nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
-  { categoria: 'Chiles rellenos', nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
-  { categoria: 'Tostadas',        nombre: 'Deshebrada',        tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
-  { categoria: 'Tostadas',        nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
-  { categoria: 'Tostadas',        nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
-  { categoria: 'Garnachas',       nombre: 'Deshebrada',        tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
-  { categoria: 'Picaditas',       nombre: 'Salsa',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
-  { categoria: 'Picaditas',       nombre: 'Frijoles',          tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
-  { categoria: 'Picaditas',       nombre: 'Pollo',             tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
-  { categoria: 'Picaditas',       nombre: 'Carne molida',      tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 4 },
-  { categoria: 'Picaditas',       nombre: 'Deshebrada',        tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 5 },
+  { categoria: 'Empanadas',       nombre: 'Queso',             tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 1 },
+  { categoria: 'Empanadas',       nombre: 'Pollo',             tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 2 },
+  { categoria: 'Empanadas',       nombre: 'Carne molida',      tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 3 },
+  { categoria: 'Chiles rellenos', nombre: 'Pollo',             tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 1 },
+  { categoria: 'Chiles rellenos', nombre: 'Carne molida',      tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 2 },
+  { categoria: 'Tostadas',        nombre: 'Deshebrada',        tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 1 },
+  { categoria: 'Tostadas',        nombre: 'Pollo',             tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 2 },
+  { categoria: 'Tostadas',        nombre: 'Carne molida',      tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 3 },
+  { categoria: 'Garnachas',       nombre: 'Deshebrada',        tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 1 },
+  { categoria: 'Picaditas',       nombre: 'Salsa',             tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 1 },
+  { categoria: 'Picaditas',       nombre: 'Frijoles',          tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 2 },
+  { categoria: 'Picaditas',       nombre: 'Pollo',             tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 3 },
+  { categoria: 'Picaditas',       nombre: 'Carne molida',      tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 4 },
+  { categoria: 'Picaditas',       nombre: 'Deshebrada',        tiene_media: false, precio_completo: 40,  precio_media: null, orden_display: 5 },
   { categoria: 'Platillos',       nombre: 'Plátanos rellenos', tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
   { categoria: 'Platillos',       nombre: 'Plátanos fritos',   tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
-  { categoria: 'Platillos',       nombre: 'Papas preparadas',  tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
+  { categoria: 'Platillos',       nombre: 'Papas preparadas',  tiene_media: false, precio_completo: 60,  precio_media: null, orden_display: 3 },
   { categoria: 'Platillos',       nombre: 'Tacos dorados',     tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 4 },
-  { categoria: 'Platillos',       nombre: 'Huevos preparados', tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 5 },
+  { categoria: 'Platillos',       nombre: 'Huevos preparados', tiene_media: false, precio_completo: 100, precio_media: null, orden_display: 5 },
   { categoria: 'Bebidas',         nombre: 'Refresco',          tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 1 },
   { categoria: 'Bebidas',         nombre: 'Agua fresca',       tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 2 },
   { categoria: 'Bebidas',         nombre: 'Agua natural',      tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 3 },
@@ -127,12 +127,10 @@ function seedMenuIfEmpty(db) {
     const countReq = store.count();
     countReq.onsuccess = () => {
       if (countReq.result > 0) {
-        // Items already exist — skip seeding entirely
         localStorage.setItem('sj_seeded', 'true');
         resolve();
         return;
       }
-      // DB is empty — seed
       const now = new Date().toISOString();
       SEED_DATA.forEach(item => {
         store.add({
@@ -154,7 +152,7 @@ function seedMenuIfEmpty(db) {
 }
 
 /**
- * One-time price migration for existing installs that have precio_completo = 0.
+ * One-time price migration v2: fixes items with precio_completo = 0.
  */
 export async function migratePricesV2() {
   if (localStorage.getItem('sj_prices_seeded_v2') === 'true') return;
@@ -170,12 +168,53 @@ export async function migratePricesV2() {
     if (item.categoria === 'Bebidas') {
       await updateMenuItem(item.id_articulo, { precio_completo: 30, precio_media: null, tiene_media: false });
     } else {
-      const updates = { precio_completo: 160, tiene_media: false, precio_media: null };
-      await updateMenuItem(item.id_articulo, updates);
+      await updateMenuItem(item.id_articulo, { precio_completo: 160, tiene_media: false, precio_media: null });
     }
   }
 
   localStorage.setItem('sj_prices_seeded_v2', 'true');
+}
+
+/**
+ * One-time price migration v3: applies correct per-item prices from spec.
+ * Migration key: sj_prices_seeded_v3
+ */
+export async function migratePricesV3() {
+  if (localStorage.getItem('sj_prices_seeded_v3') === 'true') return;
+
+  const PRICE_MAP = {
+    'Empanadas|Queso':              { precio_completo: 40,  precio_media: null },
+    'Empanadas|Pollo':              { precio_completo: 40,  precio_media: null },
+    'Empanadas|Carne molida':       { precio_completo: 40,  precio_media: null },
+    'Chiles rellenos|Pollo':        { precio_completo: 40,  precio_media: null },
+    'Chiles rellenos|Carne molida': { precio_completo: 40,  precio_media: null },
+    'Tostadas|Deshebrada':          { precio_completo: 40,  precio_media: null },
+    'Tostadas|Pollo':               { precio_completo: 40,  precio_media: null },
+    'Tostadas|Carne molida':        { precio_completo: 40,  precio_media: null },
+    'Garnachas|Deshebrada':         { precio_completo: 40,  precio_media: null },
+    'Picaditas|Salsa':              { precio_completo: 30,  precio_media: null },
+    'Picaditas|Frijoles':           { precio_completo: 30,  precio_media: null },
+    'Picaditas|Pollo':              { precio_completo: 40,  precio_media: null },
+    'Picaditas|Carne molida':       { precio_completo: 40,  precio_media: null },
+    'Picaditas|Deshebrada':         { precio_completo: 40,  precio_media: null },
+    'Platillos|Plátanos rellenos':  { precio_completo: 160, precio_media: null },
+    'Platillos|Plátanos fritos':    { precio_completo: 160, precio_media: null },
+    'Platillos|Papas preparadas':   { precio_completo: 60,  precio_media: null },
+    'Platillos|Tacos dorados':      { precio_completo: 160, precio_media: null },
+    'Platillos|Huevos preparados':  { precio_completo: 100, precio_media: null },
+    'Bebidas|Refresco':             { precio_completo: 30,  precio_media: null },
+    'Bebidas|Agua fresca':          { precio_completo: 30,  precio_media: null },
+    'Bebidas|Agua natural':         { precio_completo: 30,  precio_media: null },
+  };
+
+  const items = await getMenuItems({});
+  for (const item of items) {
+    const key = `${item.categoria}|${item.nombre}`;
+    if (PRICE_MAP[key]) {
+      await updateMenuItem(item.id_articulo, PRICE_MAP[key]);
+    }
+  }
+  localStorage.setItem('sj_prices_seeded_v3', 'true');
 }
 
 /**
@@ -193,7 +232,6 @@ export async function dedupMenuItems() {
   }
   for (const group of Object.values(groups)) {
     if (group.length <= 1) continue;
-    // Keep highest id (most recently inserted / most correct after migration)
     group.sort((a, b) => b.id_articulo - a.id_articulo);
     for (const dup of group.slice(1)) {
       await deleteMenuItem(dup.id_articulo);
@@ -306,6 +344,23 @@ export async function getKitchenOrders() {
 export async function getOrdersByDate(date) {
   const db = await openDB();
   return getAllFromIndex(db, 'ordenes', 'fecha', date);
+}
+
+/**
+ * Get all orders with fecha >= from AND fecha <= to (inclusive, YYYY-MM-DD strings).
+ */
+export async function getOrdersInRange(from, to) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx    = db.transaction('ordenes', 'readonly');
+    const store = tx.objectStore('ordenes');
+    const req   = store.getAll();
+    req.onsuccess = (e) => {
+      const all = e.target.result || [];
+      resolve(all.filter(o => o.fecha >= from && o.fecha <= to));
+    };
+    req.onerror = (e) => reject(e.target.error);
+  });
 }
 
 /* =====================================================
