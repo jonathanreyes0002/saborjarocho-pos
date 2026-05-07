@@ -8,8 +8,8 @@ import {
   getMenuItems, saveMenuItem, updateMenuItem, deleteMenuItem,
   getMenuItemById, snapshotInProgress, recoverOrders,
   generateFolio, todayStr, getOrdersByDate,
-  getKitchenOrders, migratePricesV2, migratePricesV3, dedupMenuItems,
-  isPieceCategory, getOrdersInRange
+  getKitchenOrders, migratePricesV2, migratePricesV3, migratePricesV4, dedupMenuItems,
+  isPieceCategory, isPackageCategory, getOrdersInRange
 } from './db.js';
 import { broadcast, listenSync } from './sync.js';
 import {
@@ -34,6 +34,27 @@ let metricasTimer     = null;
 
 const pieceQty = {};   // { [id_articulo]: number } — qty selector for piece categories
 const regQty   = {};   // { [`${id}_c`|`${id}_m`]: number } — qty selector for regular items
+
+/* =====================================================
+   PACKAGE DATA
+   ===================================================== */
+const PACKAGE_DATA = {
+  'Una Probadita de Todo': {
+    description: 'Degustación — una pieza de cada tipo',
+    pieces: 4,
+    options: ['Empanada Queso','Empanada Pollo','Empanada Carne Molida','Garnacha Deshebrada','Picadita Salsa','Picadita Frijoles','Tostada Deshebrada','Tostada Pollo','Tostada Carne Molida'],
+  },
+  'Empanadas Artesanales': {
+    description: 'Las Clásicas no Fallan',
+    pieces: 4,
+    options: ['Queso','Pollo','Carne Molida'],
+  },
+  'Para Cualquier Antojo': {
+    description: 'A tu Gusto — 4 piezas combinadas',
+    pieces: 4,
+    options: ['Empanada Queso','Empanada Pollo','Empanada Carne Molida','Garnacha Deshebrada','Picadita Salsa','Picadita Frijoles','Tostada Deshebrada','Tostada Pollo','Tostada Carne Molida'],
+  },
+};
 
 /* =====================================================
    CONFIG HELPERS
@@ -73,6 +94,7 @@ async function init() {
 
   await migratePricesV2();
   await migratePricesV3();
+  await migratePricesV4();
 
   // One-time deduplication
   if (!localStorage.getItem('sj_dedup_done')) {
@@ -246,19 +268,50 @@ async function renderMenuPanel() {
     return;
   }
 
+  const CATEGORY_ORDER = ['Empanadas','Chiles rellenos','Tostadas','Garnachas','Picaditas','Platillos','Paquetes','Bebidas'];
+
   const cats = {};
   for (const item of items) {
     if (!cats[item.categoria]) cats[item.categoria] = [];
     cats[item.categoria].push(item);
   }
 
-  scroll.innerHTML = Object.entries(cats).map(([cat, catItems]) => {
+  const catEntries = Object.entries(cats);
+  catEntries.sort(([a], [b]) => {
+    const ai = CATEGORY_ORDER.indexOf(a), bi = CATEGORY_ORDER.indexOf(b);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+
+  scroll.innerHTML = catEntries.map(([cat, catItems]) => {
     const ispiece  = isPieceCategory(cat);
+    const isPkg    = isPackageCategory(cat);
     const isBebida = cat === 'Bebidas';
+    const catClass = isPkg ? 'menu-category-paquetes' : '';
 
     const itemsHtml = catItems.map(item => {
       const id    = item.id_articulo;
       const price = item.precio_completo || 0;
+
+      if (isPkg) {
+        const pkgData = PACKAGE_DATA[item.nombre] || {};
+        return `
+          <div class="menu-item-row">
+            <div class="menu-item-info">
+              <div class="menu-item-name pkg-name">${esc(item.nombre)}</div>
+              ${pkgData.description ? `<div class="menu-item-price pkg-desc">${esc(pkgData.description)}</div>` : ''}
+              <div class="pkg-meta-row">
+                4 piezas · <span class="pkg-price-gold">$${price.toFixed(0)}</span>
+                <span class="pkg-bebida-label">🎁 Bebida incluida</span>
+              </div>
+            </div>
+            <div class="menu-item-controls">
+              <button class="btn-add-package" data-item-id="${id}">Configurar →</button>
+            </div>
+          </div>`;
+      }
 
       if (ispiece) {
         const qty = pieceQty[id] || 1;
@@ -318,7 +371,7 @@ async function renderMenuPanel() {
     }).join('');
 
     return `
-      <div class="menu-category">
+      <div class="menu-category ${catClass}">
         <div class="menu-category-title">${esc(cat)}</div>
         ${itemsHtml}
       </div>`;
@@ -348,6 +401,80 @@ function updateRegQtyRow(itemId, porcion) {
   }
 }
 
+function showPackageModal(item) {
+  const pkgData = PACKAGE_DATA[item.nombre];
+  if (!pkgData) return;
+
+  document.getElementById('modal-package-config')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id        = 'modal-package-config';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-box pkg-modal-box">
+      <div class="modal-header pkg-modal-header">
+        <div class="modal-title pkg-modal-title">${esc(item.nombre)}</div>
+        <button class="header-btn" id="pkg-modal-close" style="background:rgba(255,255,255,0.15);color:#fff">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="pkg-modal-desc">${esc(pkgData.description)}</p>
+        <p class="pkg-pieces-info">Selecciona el sabor de cada pieza:</p>
+        <div class="pkg-slots">
+          ${Array.from({ length: pkgData.pieces }, (_, i) => `
+            <div class="pkg-slot">
+              <label class="pkg-slot-label">Pieza ${i + 1}</label>
+              <select class="pkg-slot-select" data-slot="${i}">
+                <option value="">— Seleccionar —</option>
+                ${pkgData.options.map(opt => `<option value="${escAttr(opt)}">${esc(opt)}</option>`).join('')}
+              </select>
+            </div>`).join('')}
+        </div>
+        <div id="pkg-slot-error" class="pin-error hidden" style="margin-top:8px">Selecciona las ${pkgData.pieces} piezas para continuar.</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="pkg-modal-cancel">Cancelar</button>
+        <button class="btn-primary pkg-confirm-btn" id="pkg-modal-confirm" disabled>Agregar paquete — $${(item.precio_completo || 160).toFixed(0)}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const selects    = modal.querySelectorAll('.pkg-slot-select');
+  const confirmBtn = modal.querySelector('#pkg-modal-confirm');
+
+  function checkAllSelected() {
+    confirmBtn.disabled = !Array.from(selects).every(s => s.value !== '');
+  }
+  selects.forEach(s => s.addEventListener('change', checkAllSelected));
+
+  modal.querySelector('#pkg-modal-close').onclick  = () => modal.remove();
+  modal.querySelector('#pkg-modal-cancel').onclick  = () => modal.remove();
+  modal.querySelector('#pkg-modal-confirm').onclick = async () => {
+    const pieces = Array.from(selects).map(s => s.value);
+    if (pieces.some(p => !p)) {
+      modal.querySelector('#pkg-slot-error').classList.remove('hidden');
+      return;
+    }
+    await addPackageToOrder(item, pieces);
+    modal.remove();
+  };
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+async function addPackageToOrder(item, pieces) {
+  currentOrderItems.push({
+    item,
+    porcion:   'completa',
+    qty:       1,
+    notas:     '',
+    isPiece:   false,
+    isPackage: true,
+    pieces,
+  });
+  await updateOrder(currentOrderId, { subtotal: calcSubtotal() });
+  saveOrderSnapshot(currentOrderId);
+  renderOrderPanel();
+}
+
 function renderOrderPanel() {
   const scroll = document.getElementById('order-scroll');
   if (!scroll) return;
@@ -359,13 +486,22 @@ function renderOrderPanel() {
       const isUnidad  = line.porcion === 'unidad';
       const isMedia   = line.porcion === 'media';
       const isPiece   = line.isPiece;
+      const isPackage = line.isPackage;
       const qty       = line.qty || 1;
       const price     = isMedia ? (line.item.precio_media || 0) : (line.item.precio_completo || 0);
       const lineTotal = price * qty;
 
       let badgeText  = isUnidad ? '1 unidad' : (isMedia ? '½ orden' : '1 orden');
       let badgeClass = isMedia ? 'portion-media' : 'portion-completa';
-      if (isPiece) { badgeText = `${qty} pz`; badgeClass = 'piezas-badge'; }
+      if (isPiece)   { badgeText = `${qty} pz`;   badgeClass = 'piezas-badge'; }
+      if (isPackage) { badgeText = '📦 Paquete';  badgeClass = 'pkg-badge'; }
+
+      const piecesHtml = isPackage && line.pieces
+        ? `<div class="order-pkg-pieces">
+            ${line.pieces.map((p, i) => `<div class="order-pkg-piece">· Pieza ${i + 1}: ${esc(p)}</div>`).join('')}
+            <div class="order-pkg-bebida">🎁 Bebida incluida</div>
+          </div>`
+        : '';
 
       return `
         <div class="order-item-block">
@@ -376,7 +512,7 @@ function renderOrderPanel() {
             </div>
             <div class="order-item-right">
               <span class="order-item-price">$${lineTotal.toFixed(2)}</span>
-              ${!isPiece ? `
+              ${!isPiece && !isPackage ? `
               <div class="qty-controls">
                 <button class="qty-btn btn-qty-dec" data-idx="${idx}">−</button>
                 <span class="qty-value">${qty}</span>
@@ -385,10 +521,11 @@ function renderOrderPanel() {
               <button class="btn-remove-item" data-idx="${idx}" aria-label="Quitar">×</button>
             </div>
           </div>
-          <input type="text" class="item-notes-input" data-line-idx="${idx}"
+          ${piecesHtml}
+          ${!isPackage ? `<input type="text" class="item-notes-input" data-line-idx="${idx}"
             value="${escAttr(line.notas || '')}"
             placeholder="Notas: sin cebolla, sin salsa..."
-            maxlength="100">
+            maxlength="100">` : ''}
         </div>`;
     }).join('');
   }
@@ -518,11 +655,15 @@ function openCheckout() {
   const listEl = document.querySelector('.checkout-items-list');
   if (listEl) {
     listEl.innerHTML = currentOrderItems.map(line => {
-      const isMedia  = line.porcion === 'media';
-      const isUnidad = line.porcion === 'unidad';
-      const isPiece  = line.isPiece;
-      const label    = isPiece ? `${line.qty || 1} pz` : (isUnidad ? '1 unidad' : (isMedia ? '½ ord.' : '1 ord.'));
-      const price    = isMedia ? (line.item.precio_media || 0) : (line.item.precio_completo || 0);
+      const isMedia   = line.porcion === 'media';
+      const isUnidad  = line.porcion === 'unidad';
+      const isPiece   = line.isPiece;
+      const isPackage = line.isPackage;
+      const label     = isPackage ? '📦 paquete'
+        : isPiece  ? `${line.qty || 1} pz`
+        : isUnidad ? '1 unidad'
+        : isMedia  ? '½ ord.' : '1 ord.';
+      const price = isMedia ? (line.item.precio_media || 0) : (line.item.precio_completo || 0);
       return `<div class="checkout-item-row">
         <span>${esc(line.item.nombre)} <span class="checkout-item-qty">${label}</span></span>
         <span>$${(price * (line.qty || 1)).toFixed(2)}</span>
@@ -670,11 +811,13 @@ async function confirmPayment() {
       id_orden:        currentOrderId,
       categoria:       line.item.categoria || '',
       articulo:        line.item.nombre,
-      porcion:         line.porcion,
+      porcion:         line.isPackage ? 'paquete' : line.porcion,
       cantidad:        line.qty || 1,
       precio_unitario: linePrice,
       subtotal_linea:  linePrice * (line.qty || 1),
-      notas:           line.notas || '',
+      notas:           line.isPackage
+        ? (line.pieces || []).map((p, i) => `Pz${i + 1}: ${p}`).join(' | ')
+        : (line.notas || ''),
     });
   }
 
@@ -1566,6 +1709,14 @@ document.addEventListener('click', async (e) => {
       broadcast({ type: 'ORDER_CANCELLED', orderId: currentOrderId });
       navigate('./index.html');
     }, 'Cancelar mesa');
+    return;
+  }
+
+  // ---- Menu: package configure ----
+  if (t.classList.contains('btn-add-package')) {
+    const id = parseInt(t.dataset.itemId);
+    const item = await getMenuItemById(id);
+    if (item) showPackageModal(item);
     return;
   }
 

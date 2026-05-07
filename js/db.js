@@ -18,6 +18,12 @@ export function isPieceCategory(categoria) {
   return PIECE_CATEGORIES.includes(categoria);
 }
 
+export const PACKAGE_CATEGORIES = ['Paquetes'];
+
+export function isPackageCategory(categoria) {
+  return PACKAGE_CATEGORIES.includes(categoria);
+}
+
 /**
  * Open (or create) the IndexedDB database.
  */
@@ -114,9 +120,12 @@ const SEED_DATA = [
   { categoria: 'Platillos',       nombre: 'Papas preparadas',  tiene_media: false, precio_completo: 60,  precio_media: null, orden_display: 3 },
   { categoria: 'Platillos',       nombre: 'Tacos dorados',     tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 4 },
   { categoria: 'Platillos',       nombre: 'Huevos preparados', tiene_media: false, precio_completo: 100, precio_media: null, orden_display: 5 },
-  { categoria: 'Bebidas',         nombre: 'Refresco',          tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 1 },
-  { categoria: 'Bebidas',         nombre: 'Agua fresca',       tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 2 },
-  { categoria: 'Bebidas',         nombre: 'Agua natural',      tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 3 },
+  { categoria: 'Bebidas',         nombre: 'Refresco',                  tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 1 },
+  { categoria: 'Bebidas',         nombre: 'Agua fresca',               tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 2 },
+  { categoria: 'Bebidas',         nombre: 'Agua natural',              tiene_media: false, precio_completo: 30,  precio_media: null, orden_display: 3 },
+  { categoria: 'Paquetes',        nombre: 'Una Probadita de Todo',     tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 1 },
+  { categoria: 'Paquetes',        nombre: 'Empanadas Artesanales',     tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 2 },
+  { categoria: 'Paquetes',        nombre: 'Para Cualquier Antojo',     tiene_media: false, precio_completo: 160, precio_media: null, orden_display: 3 },
 ];
 
 function seedMenuIfEmpty(db) {
@@ -215,6 +224,45 @@ export async function migratePricesV3() {
     }
   }
   localStorage.setItem('sj_prices_seeded_v3', 'true');
+}
+
+/**
+ * One-time migration v4: corrects 4 Platillos prices + adds Paquetes items.
+ * Migration key: sj_prices_seeded_v4
+ */
+export async function migratePricesV4() {
+  if (localStorage.getItem('sj_prices_seeded_v4') === 'true') return;
+
+  const PRICE_FIXES = {
+    'Platillos|Tacos dorados':     { precio_completo: 120 },
+    'Platillos|Plátanos fritos':   { precio_completo: 40  },
+    'Platillos|Huevos preparados': { precio_completo: 60  },
+    'Platillos|Papas preparadas':  { precio_completo: 40  },
+  };
+
+  const PACKAGES_TO_ADD = [
+    { categoria: 'Paquetes', nombre: 'Una Probadita de Todo', precio_completo: 160, precio_media: null, tiene_media: false, activo: true, orden_display: 1 },
+    { categoria: 'Paquetes', nombre: 'Empanadas Artesanales', precio_completo: 160, precio_media: null, tiene_media: false, activo: true, orden_display: 2 },
+    { categoria: 'Paquetes', nombre: 'Para Cualquier Antojo', precio_completo: 160, precio_media: null, tiene_media: false, activo: true, orden_display: 3 },
+  ];
+
+  const items = await getMenuItems({});
+
+  for (const item of items) {
+    const key = `${item.categoria}|${item.nombre}`;
+    if (PRICE_FIXES[key]) {
+      await updateMenuItem(item.id_articulo, PRICE_FIXES[key]);
+    }
+  }
+
+  const existingPkgNames = items.filter(i => i.categoria === 'Paquetes').map(i => i.nombre);
+  for (const pkg of PACKAGES_TO_ADD) {
+    if (!existingPkgNames.includes(pkg.nombre)) {
+      await saveMenuItem(pkg);
+    }
+  }
+
+  localStorage.setItem('sj_prices_seeded_v4', 'true');
 }
 
 /**
